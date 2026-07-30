@@ -65,7 +65,7 @@ public:
     void send_hello();
     void send_ready();
     void send_seed(unsigned seed);
-    void send_state(bn::fixed x, bn::fixed y, int lives, bool braking);
+    void send_state(bn::fixed x, bn::fixed y, int lives, int facing);
     void send_fire(bn::fixed y, int weapon, int facing = 1);
     void send_dead();
     void send_slow(int frames);

@@ -539,7 +539,7 @@ void game_scene::_update_player()
 
     if(_is_multi())
     {
-        net().send_state(_x, _y, _lives, braking);
+        net().send_state(_x, _y, _lives, _facing);
     }
 }
 

@@ -22,7 +22,8 @@ constexpr int encode_x(bn::fixed x)
 
 constexpr int encode_y(bn::fixed y)
 {
-    return bn::clamp((y + 80).right_shift_integer(), 0, 255);
+    // 7 bits for position; high bit reserved for facing in state_y packets.
+    return bn::clamp((y + 80).right_shift_integer(), 0, 127);
 }
 
 constexpr bn::fixed decode_x(int payload)
@@ -168,7 +169,8 @@ void link_net::_handle(int raw)
         break;
 
     case net_msg::state_y:
-        _remotes[player].y = decode_y(payload);
+        _remotes[player].facing = (payload & 0x80) ? -1 : 1;
+        _remotes[player].y = decode_y(payload & 0x7F);
         _remotes[player].alive = true;
         break;
 
@@ -313,10 +315,11 @@ void link_net::send_seed(unsigned seed)
     _enqueue(pack(_local_id, net_msg::seed_hi, int(_seed_hi)), true);
 }
 
-void link_net::send_state(bn::fixed x, bn::fixed y, int lives, bool)
+void link_net::send_state(bn::fixed x, bn::fixed y, int lives, int facing)
 {
     _enqueue(pack(_local_id, net_msg::state_x, encode_x(x)));
-    _enqueue(pack(_local_id, net_msg::state_y, encode_y(y)));
+    int y_payload = encode_y(y) | ((facing < 0) ? 0x80 : 0);
+    _enqueue(pack(_local_id, net_msg::state_y, y_payload));
     if((_send_phase & 7) == 7)
     {
         _enqueue(pack(_local_id, net_msg::lives, bn::clamp(lives, 0, max_lives)));
