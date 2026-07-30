@@ -45,7 +45,7 @@ git clone --depth 1 https://github.com/afska/gba-link-connection.git
 
 | Menu | Hardware | Notes |
 |---|---|---|
-| LINK CABLE | GBA link cable / mGBA multiplayer windows | 2–4 players |
+| LINK CABLE | GBA link cable / mGBA multiplayer windows | 2–4 players (Butano `bn::link`) |
 | WIRELESS | Official Wireless Adapter | 2–5 players, room name `COSMIC` |
 | ONLINE | Mobile Adapter GB (REON) | 2 players; A dials `127.0.0.1`, START waits for call |
 
