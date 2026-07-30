@@ -17,14 +17,12 @@ constexpr int pack(int player, net_msg type, int payload)
 
 constexpr int encode_x(bn::fixed x)
 {
-    // playfield x roughly [-104, 40] → [0, 255]
     int v = (x + 104).right_shift_integer();
     return bn::clamp(v, 0, 255);
 }
 
 constexpr int encode_y(bn::fixed y)
 {
-    // playfield y roughly [-64, 64] → [0, 255]
     int v = (y + 80).right_shift_integer();
     return bn::clamp(v, 0, 255);
 }
@@ -41,7 +39,6 @@ constexpr bn::fixed decode_y(int payload)
 
 constexpr int encode_mx(bn::fixed x)
 {
-    // meteor x roughly [-140, 140]
     int v = (x + 140).right_shift_integer();
     return bn::clamp(v, 0, 255);
 }
@@ -77,6 +74,7 @@ void link_net::start(game_mode mode, int max_players_wanted)
     _seed_hi = 0;
     _timeout = 0;
     _send_phase = 0;
+    _out_n = 0;
     _m_have_a = _m_have_b = _m_have_c = false;
     _spawn_ready = false;
     _kill_ready = false;
@@ -87,7 +85,7 @@ void link_net::start(game_mode mode, int max_players_wanted)
     {
         _remotes[i] = remote_player();
     }
-    bn::link::send(pack(0, net_msg::hello, _max_players));
+    _enqueue(pack(0, net_msg::hello, _max_players), true);
 }
 
 void link_net::stop()
@@ -98,6 +96,51 @@ void link_net::stop()
     }
     _active = false;
     _connected = false;
+    _out_n = 0;
+}
+
+void link_net::_enqueue(int packet, bool urgent)
+{
+    if(_out_n >= out_cap)
+    {
+        if(! urgent)
+        {
+            return;
+        }
+        // Drop oldest to make room for urgent traffic.
+        for(int i = 1; i < _out_n; ++i)
+        {
+            _out_q[i - 1] = _out_q[i];
+        }
+        --_out_n;
+    }
+
+    if(urgent)
+    {
+        for(int i = _out_n; i > 0; --i)
+        {
+            _out_q[i] = _out_q[i - 1];
+        }
+        _out_q[0] = packet;
+        ++_out_n;
+        return;
+    }
+
+    _out_q[_out_n++] = packet;
+}
+
+void link_net::_flush_one()
+{
+    if(_out_n <= 0)
+    {
+        return;
+    }
+    bn::link::send(_out_q[0]);
+    for(int i = 1; i < _out_n; ++i)
+    {
+        _out_q[i - 1] = _out_q[i];
+    }
+    --_out_n;
 }
 
 void link_net::_mark_seen(int player)
@@ -109,13 +152,25 @@ void link_net::_mark_seen(int player)
     }
 }
 
+void link_net::_finish_meteor_spawn()
+{
+    _spawn_event.slot = _m_a;
+    _spawn_event.size = _m_size;
+    _spawn_event.frame = _m_frame;
+    _spawn_event.y = decode_y(_m_y);
+    const int speed_tenths = bn::clamp(_m_vxq, 8, 60);
+    _spawn_event.vx = -bn::fixed(speed_tenths) / 10;
+    _spawn_event.vy = bn::fixed(int(_m_vyq) - 1) * bn::fixed(2) / 10;
+    _spawn_ready = true;
+    _m_have_a = _m_have_b = _m_have_c = false;
+}
+
 void link_net::_handle(int raw)
 {
     int player = raw & 0xF;
     auto type = net_msg((raw >> 4) & 0xF);
     int payload = (raw >> 8) & 0xFF;
 
-    // Player 0xF = world/meteor pose channel (not a real pilot).
     if(player == 0xF)
     {
         if(type == net_msg::lives)
@@ -230,11 +285,13 @@ void link_net::_handle(int raw)
         _m_have_a = true;
         _m_have_b = false;
         _m_have_c = false;
+        _m_age = _age;
         break;
 
     case net_msg::meteor_b:
         _m_y = payload;
         _m_have_b = true;
+        _m_age = _age;
         if(_m_have_a && _m_have_b && _m_have_c)
         {
             _finish_meteor_spawn();
@@ -242,10 +299,10 @@ void link_net::_handle(int raw)
         break;
 
     case net_msg::meteor_c:
-        // bits0-5: speed tenths; bits6-7: vy code 0..3 → -0.2,0,0.2,0.4
         _m_vxq = payload & 0x3F;
         _m_vyq = (payload >> 6) & 0x3;
         _m_have_c = true;
+        _m_age = _age;
         if(_m_have_a && _m_have_b && _m_have_c)
         {
             _finish_meteor_spawn();
@@ -269,24 +326,9 @@ void link_net::_handle(int raw)
     }
 }
 
-void link_net::_finish_meteor_spawn()
-{
-    _spawn_event.slot = _m_a;
-    _spawn_event.size = _m_size;
-    _spawn_event.frame = _m_frame;
-    _spawn_event.y = decode_y(_m_y);
-    const int speed_tenths = bn::clamp(_m_vxq, 8, 60);
-    _spawn_event.vx = -bn::fixed(speed_tenths) / 10;
-    // vy codes 0..3 → -0.2, 0.0, 0.2, 0.4
-    _spawn_event.vy = bn::fixed(int(_m_vyq) - 1) * bn::fixed(2) / 10;
-    _spawn_ready = true;
-    _m_have_a = _m_have_b = _m_have_c = false;
-}
-
 void link_net::_pump_bn_link()
 {
-    // Drain more receive slots so multi-packet meteor spawns land same frame.
-    for(int attempt = 0; attempt < 8; ++attempt)
+    for(int attempt = 0; attempt < 4; ++attempt)
     {
         auto state = bn::link::receive();
         if(! state)
@@ -326,7 +368,12 @@ void link_net::update()
     ++_age;
     _pump_bn_link();
 
-    // Drop remotes that went silent for ~2 seconds.
+    // Abandon incomplete spawn assembly after ~1s.
+    if((_m_have_a || _m_have_b || _m_have_c) && (_age - _m_age) > 60)
+    {
+        _m_have_a = _m_have_b = _m_have_c = false;
+    }
+
     for(int i = 0; i < max_players; ++i)
     {
         if(i == _local_id) continue;
@@ -336,6 +383,9 @@ void link_net::update()
             _remotes[i].alive = false;
         }
     }
+
+    // One packet per frame — required for reliable multi-packet messages.
+    _flush_one();
 }
 
 bool link_net::is_connected() const
@@ -359,8 +409,7 @@ bool link_net::lobby_ready() const
         return false;
     }
 
-    // Need every other active slot to have said hello recently.
-    int seen = 1; // local
+    int seen = 1;
     for(int i = 0; i < max_players; ++i)
     {
         if(i == _local_id) continue;
@@ -394,12 +443,12 @@ int link_net::host_tick() const
 
 void link_net::send_hello()
 {
-    bn::link::send(pack(_local_id, net_msg::hello, _max_players));
+    _enqueue(pack(_local_id, net_msg::hello, _max_players));
 }
 
 void link_net::send_ready()
 {
-    bn::link::send(pack(_local_id, net_msg::ready, 1));
+    _enqueue(pack(_local_id, net_msg::ready, 1), true);
 }
 
 void link_net::send_seed(unsigned seed)
@@ -409,42 +458,42 @@ void link_net::send_seed(unsigned seed)
     _seed_hi = (seed >> 8) & 0xFFu;
     _got_seed_lo = true;
     _got_seed_hi = true;
-    bn::link::send(pack(_local_id, net_msg::seed_lo, int(_seed_lo)));
-    bn::link::send(pack(_local_id, net_msg::seed_hi, int(_seed_hi)));
+    _enqueue(pack(_local_id, net_msg::seed_lo, int(_seed_lo)), true);
+    _enqueue(pack(_local_id, net_msg::seed_hi, int(_seed_hi)), true);
 }
 
 void link_net::send_state(bn::fixed x, bn::fixed y, int lives, bool)
 {
-    // Alternate emphasis but always push both axes for harder position sync.
-    if((_send_phase & 1) == 0)
+    // Exactly one state packet per call so ships/meteors can share the wire.
+    if((_send_phase % 3) == 0)
     {
-        bn::link::send(pack(_local_id, net_msg::state_x, encode_x(x)));
-        bn::link::send(pack(_local_id, net_msg::state_y, encode_y(y)));
+        _enqueue(pack(_local_id, net_msg::state_x, encode_x(x)));
+    }
+    else if((_send_phase % 3) == 1)
+    {
+        _enqueue(pack(_local_id, net_msg::state_y, encode_y(y)));
     }
     else
     {
-        bn::link::send(pack(_local_id, net_msg::state_y, encode_y(y)));
-        bn::link::send(pack(_local_id, net_msg::state_x, encode_x(x)));
-        bn::link::send(pack(_local_id, net_msg::lives, bn::clamp(lives, 0, max_lives)));
+        _enqueue(pack(_local_id, net_msg::lives, bn::clamp(lives, 0, max_lives)));
     }
     ++_send_phase;
 }
 
 void link_net::send_fire(bn::fixed, int weapon)
 {
-    bn::link::send(pack(_local_id, net_msg::fire, weapon & 0x3));
+    _enqueue(pack(_local_id, net_msg::fire, weapon & 0x3), true);
 }
 
 void link_net::send_dead()
 {
-    bn::link::send(pack(_local_id, net_msg::dead, 0));
-    bn::link::send(pack(_local_id, net_msg::lives, 0));
+    _enqueue(pack(_local_id, net_msg::dead, 0), true);
 }
 
 void link_net::send_tick(int tick)
 {
     _host_tick = tick & 0xFF;
-    bn::link::send(pack(_local_id, net_msg::tick, _host_tick));
+    _enqueue(pack(_local_id, net_msg::tick, _host_tick));
 }
 
 void link_net::send_meteor_spawn(int slot, int size, bn::fixed y, bn::fixed vx, bn::fixed vy, int frame)
@@ -459,28 +508,29 @@ void link_net::send_meteor_spawn(int slot, int size, bn::fixed y, bn::fixed vx, 
     else if(vy > bn::fixed(0.1)) vy_code = 2;
     const int c = (speed & 0x3F) | ((vy_code & 3) << 6);
 
-    bn::link::send(pack(_local_id, net_msg::meteor_a, a));
-    bn::link::send(pack(_local_id, net_msg::meteor_b, b));
-    bn::link::send(pack(_local_id, net_msg::meteor_c, c));
+    // Urgent so spawn parts aren't stuck behind ship spam; still one/frame.
+    _enqueue(pack(_local_id, net_msg::meteor_a, a), true);
+    _enqueue(pack(_local_id, net_msg::meteor_b, b), true);
+    _enqueue(pack(_local_id, net_msg::meteor_c, c), true);
 }
 
 void link_net::send_meteor_kill(int slot, bool explode)
 {
     int payload = slot & 0x1F;
     if(explode) payload |= 0x20;
-    bn::link::send(pack(_local_id, net_msg::meteor_kill, payload));
+    _enqueue(pack(_local_id, net_msg::meteor_kill, payload), true);
 }
 
 void link_net::send_meteor_pose(int slot, bn::fixed x, bn::fixed y)
 {
-    bn::link::send(pack(0xF, net_msg::lives, slot & 0x1F));
-    bn::link::send(pack(0xF, net_msg::state_x, encode_mx(x)));
-    bn::link::send(pack(0xF, net_msg::state_y, encode_y(y)));
+    _enqueue(pack(0xF, net_msg::lives, slot & 0x1F));
+    _enqueue(pack(0xF, net_msg::state_x, encode_mx(x)));
+    _enqueue(pack(0xF, net_msg::state_y, encode_y(y)));
 }
 
 void link_net::send_slow(int frames)
 {
-    bn::link::send(pack(_local_id, net_msg::slow, bn::clamp(frames, 1, 255)));
+    _enqueue(pack(_local_id, net_msg::slow, bn::clamp(frames, 1, 255)), true);
 }
 
 const remote_player& link_net::remote(int id) const

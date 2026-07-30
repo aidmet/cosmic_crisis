@@ -624,12 +624,12 @@ void game_scene::_update_meteors()
         }
     }
 
-    // Host streams positions so clients stay locked to the same field.
-    if(_is_multi() && net().host())
+    // Host streams positions sparsely so spawn/kill packets aren't starved.
+    if(_is_multi() && net().host() && (_engine_frame % 16) == 0)
     {
         for(int tries = 0; tries < max_meteors; ++tries)
         {
-            const int idx = (_engine_frame + tries) % max_meteors;
+            const int idx = (_engine_frame / 16 + tries) % max_meteors;
             if(_meteors[idx].active)
             {
                 net().send_meteor_pose(idx, _meteors[idx].x, _meteors[idx].y);
@@ -753,11 +753,6 @@ void game_scene::_update_remote()
     if(! _is_multi()) return;
     net().update();
     int local = net().local_id();
-
-    if(net().host())
-    {
-        net().send_tick(_engine_frame);
-    }
 
     for(int i = 0; i < max_players; ++i)
     {

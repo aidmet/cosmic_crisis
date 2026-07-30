@@ -13,6 +13,9 @@ namespace cc
 // bits 0-3: player id
 // bits 4-7: msg type
 // bits 8-15: payload
+//
+// IMPORTANT: bn::link only keeps the latest message per peer per frame.
+// We therefore queue outbound packets and flush exactly ONE send per update().
 
 enum class net_msg : int
 {
@@ -108,6 +111,8 @@ private:
     void _handle(int raw);
     void _mark_seen(int player);
     void _finish_meteor_spawn();
+    void _enqueue(int packet, bool urgent = false);
+    void _flush_one();
 
     game_mode _mode = game_mode::multi_cable;
     bool _active = false;
@@ -127,7 +132,11 @@ private:
     int _timeout = 0;
     int _send_phase = 0;
 
-    // Incoming meteor spawn assembly (3 packets)
+    static constexpr int out_cap = 32;
+    int _out_q[out_cap];
+    int _out_n = 0;
+
+    // Incoming meteor spawn assembly (across frames)
     int _m_a = -1;
     int _m_size = 0;
     int _m_frame = 0;
@@ -137,6 +146,7 @@ private:
     bool _m_have_c = false;
     int _m_vxq = 0;
     int _m_vyq = 0;
+    int _m_age = 0;
 
     bool _spawn_ready = false;
     meteor_spawn_event _spawn_event;
@@ -146,7 +156,6 @@ private:
     bool _slow_ready = false;
     int _slow_frames = 0;
 
-    // World-channel meteor pose (player id 0xF)
     int _pose_slot = 0;
     int _pose_x = 0;
     int _pose_y = 0;
