@@ -38,6 +38,18 @@ constexpr bn::fixed decode_y(int payload)
 {
     return bn::fixed(payload) - 80;
 }
+
+constexpr int encode_mx(bn::fixed x)
+{
+    // meteor x roughly [-140, 140] → [0, 255]
+    int v = (x + 140).right_shift_integer();
+    return bn::clamp(v, 0, 255);
+}
+
+constexpr bn::fixed decode_mx(int payload)
+{
+    return bn::fixed(payload) - 140;
+}
 }
 
 link_net& net()
@@ -69,6 +81,8 @@ void link_net::start(game_mode mode, int max_players_wanted)
     _spawn_ready = false;
     _kill_ready = false;
     _slow_ready = false;
+    _pose_ready = false;
+    _pose_have_slot = _pose_have_x = _pose_have_y = false;
     for(int i = 0; i < max_players; ++i)
     {
         _remotes[i] = remote_player();
@@ -100,6 +114,38 @@ void link_net::_handle(int raw)
     int player = raw & 0xF;
     auto type = net_msg((raw >> 4) & 0xF);
     int payload = (raw >> 8) & 0xFF;
+
+    // Player 0xF = world/meteor pose channel (not a real pilot).
+    if(player == 0xF)
+    {
+        if(type == net_msg::lives)
+        {
+            _pose_slot = payload & 0x1F;
+            _pose_have_slot = true;
+            _pose_have_x = false;
+            _pose_have_y = false;
+        }
+        else if(type == net_msg::state_x)
+        {
+            _pose_x = payload;
+            _pose_have_x = true;
+        }
+        else if(type == net_msg::state_y)
+        {
+            _pose_y = payload;
+            _pose_have_y = true;
+        }
+
+        if(_pose_have_slot && _pose_have_x && _pose_have_y)
+        {
+            _pose_event.slot = _pose_slot;
+            _pose_event.x = decode_mx(_pose_x);
+            _pose_event.y = decode_y(_pose_y);
+            _pose_ready = true;
+            _pose_have_slot = _pose_have_x = _pose_have_y = false;
+        }
+        return;
+    }
 
     if(player < 0 || player >= max_players)
     {
@@ -196,8 +242,9 @@ void link_net::_handle(int raw)
         break;
 
     case net_msg::meteor_c:
-        _m_vxq = payload & 0xF;
-        _m_vyq = (payload >> 4) & 0xF;
+        // bits0-5: speed tenths; bits6-7: vy code 0..3 → -0.2,0,0.2,0.4
+        _m_vxq = payload & 0x3F;
+        _m_vyq = (payload >> 6) & 0x3;
         _m_have_c = true;
         if(_m_have_a && _m_have_b && _m_have_c)
         {
@@ -228,8 +275,10 @@ void link_net::_finish_meteor_spawn()
     _spawn_event.size = _m_size;
     _spawn_event.frame = _m_frame;
     _spawn_event.y = decode_y(_m_y);
-    _spawn_event.vx = -(bn::fixed(10) + bn::fixed(_m_vxq) * bn::fixed(15)) / 10;
-    _spawn_event.vy = (bn::fixed(_m_vyq) - 5) / 10;
+    const int speed_tenths = bn::clamp(_m_vxq, 8, 60);
+    _spawn_event.vx = -bn::fixed(speed_tenths) / 10;
+    // vy codes 0..3 → -0.2, 0.0, 0.2, 0.4
+    _spawn_event.vy = bn::fixed(int(_m_vyq) - 1) * bn::fixed(2) / 10;
     _spawn_ready = true;
     _m_have_a = _m_have_b = _m_have_c = false;
 }
@@ -402,11 +451,13 @@ void link_net::send_meteor_spawn(int slot, int size, bn::fixed y, bn::fixed vx, 
 {
     const int a = (slot & 0x1F) | ((size & 1) << 5) | ((frame & 3) << 6);
     const int b = encode_y(y);
-    int vxq = (-vx * 10 - 10).right_shift_integer();
-    vxq = bn::clamp(vxq, 0, 15);
-    int vyq = (vy * 10 + 5).right_shift_integer();
-    vyq = bn::clamp(vyq, 0, 15);
-    const int c = (vxq & 0xF) | ((vyq & 0xF) << 4);
+    int speed = (-vx * 10).right_shift_integer();
+    speed = bn::clamp(speed, 8, 60);
+    int vy_code = 1;
+    if(vy < bn::fixed(-0.1)) vy_code = 0;
+    else if(vy > bn::fixed(0.3)) vy_code = 3;
+    else if(vy > bn::fixed(0.1)) vy_code = 2;
+    const int c = (speed & 0x3F) | ((vy_code & 3) << 6);
 
     bn::link::send(pack(_local_id, net_msg::meteor_a, a));
     bn::link::send(pack(_local_id, net_msg::meteor_b, b));
@@ -418,6 +469,13 @@ void link_net::send_meteor_kill(int slot, bool explode)
     int payload = slot & 0x1F;
     if(explode) payload |= 0x20;
     bn::link::send(pack(_local_id, net_msg::meteor_kill, payload));
+}
+
+void link_net::send_meteor_pose(int slot, bn::fixed x, bn::fixed y)
+{
+    bn::link::send(pack(0xF, net_msg::lives, slot & 0x1F));
+    bn::link::send(pack(0xF, net_msg::state_x, encode_mx(x)));
+    bn::link::send(pack(0xF, net_msg::state_y, encode_y(y)));
 }
 
 void link_net::send_slow(int frames)
@@ -472,6 +530,14 @@ bool link_net::poll_meteor_kill(int& slot, bool& explode)
     slot = _kill_slot;
     explode = _kill_explode;
     _kill_ready = false;
+    return true;
+}
+
+bool link_net::poll_meteor_pose(meteor_pose_event& out)
+{
+    if(! _pose_ready) return false;
+    out = _pose_event;
+    _pose_ready = false;
     return true;
 }
 

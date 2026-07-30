@@ -56,6 +56,13 @@ struct meteor_spawn_event
     bn::fixed vy = 0;
 };
 
+struct meteor_pose_event
+{
+    int slot = 0;
+    bn::fixed x = 0;
+    bn::fixed y = 0;
+};
+
 class link_net
 {
 public:
@@ -80,6 +87,7 @@ public:
     void send_tick(int tick);
     void send_meteor_spawn(int slot, int size, bn::fixed y, bn::fixed vx, bn::fixed vy, int frame);
     void send_meteor_kill(int slot, bool explode = true);
+    void send_meteor_pose(int slot, bn::fixed x, bn::fixed y);
     void send_slow(int frames);
 
     [[nodiscard]] const remote_player& remote(int id) const;
@@ -92,6 +100,7 @@ public:
     int consume_fire(int id);
     [[nodiscard]] bool poll_meteor_spawn(meteor_spawn_event& out);
     [[nodiscard]] bool poll_meteor_kill(int& slot, bool& explode);
+    [[nodiscard]] bool poll_meteor_pose(meteor_pose_event& out);
     [[nodiscard]] bool poll_slow(int& frames);
 
 private:
@@ -136,6 +145,16 @@ private:
     bool _kill_explode = true;
     bool _slow_ready = false;
     int _slow_frames = 0;
+
+    // World-channel meteor pose (player id 0xF)
+    int _pose_slot = 0;
+    int _pose_x = 0;
+    int _pose_y = 0;
+    bool _pose_have_slot = false;
+    bool _pose_have_x = false;
+    bool _pose_have_y = false;
+    bool _pose_ready = false;
+    meteor_pose_event _pose_event;
 };
 
 link_net& net();

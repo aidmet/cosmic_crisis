@@ -305,6 +305,20 @@ void game_scene::_apply_net_world()
         _kill_meteor_slot(kill_slot, true, kill_explode, false, kill_explode);
     }
 
+    meteor_pose_event pose;
+    while(net().poll_meteor_pose(pose))
+    {
+        if(pose.slot < 0 || pose.slot >= max_meteors) continue;
+        meteor& m = _meteors[pose.slot];
+        if(! m.active) continue;
+        m.x = pose.x;
+        m.y = pose.y;
+        if(m.sprite)
+        {
+            m.sprite->set_position(m.x, m.y);
+        }
+    }
+
     int slow_frames = 0;
     if(net().poll_slow(slow_frames))
     {
@@ -550,14 +564,54 @@ void game_scene::_update_meteors()
             continue;
         }
 
-        // collide player
-        bn::fixed rr = m.size ? bn::fixed(14) : bn::fixed(8);
+        const bn::fixed rr = m.size ? bn::fixed(14) : bn::fixed(8);
+
+        // Local pilot collision
         bn::fixed dx = m.x - _x;
         bn::fixed dy = m.y - _y;
         if(dx * dx + dy * dy < rr * rr)
         {
             _kill_meteor_slot(i, false, false, false, false);
             _hit_player();
+            continue;
+        }
+
+        // Remote pilots: destroy meteor so it doesn't ghost through them
+        if(_is_multi())
+        {
+            const int local = net().local_id();
+            bool hit_remote = false;
+            for(int p = 0; p < max_players; ++p)
+            {
+                if(p == local) continue;
+                const remote_player& r = net().remote(p);
+                if(! r.active || ! r.alive) continue;
+                dx = m.x - r.x;
+                dy = m.y - r.y;
+                if(dx * dx + dy * dy < rr * rr)
+                {
+                    hit_remote = true;
+                    break;
+                }
+            }
+            if(hit_remote)
+            {
+                _kill_meteor_slot(i, false, false, false, false);
+            }
+        }
+    }
+
+    // Host streams positions so clients stay locked to the same field.
+    if(_is_multi() && net().host())
+    {
+        for(int tries = 0; tries < max_meteors; ++tries)
+        {
+            const int idx = (_engine_frame + tries) % max_meteors;
+            if(_meteors[idx].active)
+            {
+                net().send_meteor_pose(idx, _meteors[idx].x, _meteors[idx].y);
+                break;
+            }
         }
     }
 }
