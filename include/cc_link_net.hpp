@@ -15,7 +15,8 @@ namespace cc
 // bits 8-15: payload
 //
 // Backends:
-// - Link cable / Wireless Adapter: gba-link-connection LinkUniversal
+// - Link cable (mGBA): Butano bn::link (proven with emulator multiplayer)
+// - Wireless Adapter: gba-link-connection LinkUniversal
 // - Online (Mobile Adapter GB / REON): LinkMobile P2P transfers
 
 enum class net_msg : int
@@ -95,6 +96,7 @@ private:
     enum class backend : int
     {
         none,
+        cable,
         universal,
         mobile
     };
@@ -103,6 +105,7 @@ private:
     void _mark_seen(int player);
     void _enqueue(int packet, bool urgent = false);
     void _flush_outgoing();
+    void _pump_cable();
     void _pump_universal();
     void _pump_mobile();
     void _install_universal_irqs();

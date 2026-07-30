@@ -1,6 +1,9 @@
 #include "cc_link_net.hpp"
 
 #include "bn_core.h"
+#include "bn_link.h"
+#include "bn_link_state.h"
+#include "bn_link_player.h"
 #include "bn_algorithm.h"
 
 #include "LinkUniversal.hpp"
@@ -119,15 +122,12 @@ void link_net::start(game_mode mode, int max_players_wanted)
         linkMobile = new LinkMobile();
         linkMobile->activate();
     }
-    else
+    else if(mode == game_mode::multi_wireless)
     {
         _backend = backend::universal;
-        const bool wireless = (mode == game_mode::multi_wireless);
-        auto protocol = wireless ? LinkUniversal::Protocol::WIRELESS_AUTO
-                                 : LinkUniversal::Protocol::CABLE;
         _install_universal_irqs();
         linkUniversal = new LinkUniversal(
-            protocol,
+            LinkUniversal::Protocol::WIRELESS_AUTO,
             "COSMIC",
             LinkUniversal::CableOptions{
                 LinkCable::BaudRate::BAUD_RATE_1,
@@ -142,6 +142,12 @@ void link_net::start(game_mode mode, int max_players_wanted)
                 LINK_WIRELESS_DEFAULT_INTERVAL,
                 LINK_WIRELESS_DEFAULT_SEND_TIMER_ID});
         linkUniversal->activate();
+    }
+    else
+    {
+        // Cable: Butano bn::link — works with mGBA multiplayer windows.
+        _backend = backend::cable;
+        bn::link::send(pack(0, net_msg::hello, _max_players));
     }
 
     _enqueue(pack(0, net_msg::hello, _max_players), true);
@@ -171,7 +177,16 @@ void link_net::stop()
         linkMobile = nullptr;
     }
 
-    _clear_extra_irqs();
+    if(_backend == backend::cable || _backend == backend::universal || _backend == backend::mobile)
+    {
+        // bn::link is lazy; deactivate clears cable. Extra IRQs only for uni/mobile.
+        if(_backend != backend::cable)
+        {
+            _clear_extra_irqs();
+        }
+        bn::link::deactivate();
+    }
+
     _backend = backend::none;
     _active = false;
     _connected = false;
@@ -295,10 +310,20 @@ void link_net::_handle(int raw)
 
 void link_net::_flush_outgoing()
 {
+    if(_backend == backend::cable)
+    {
+        for(int n = 0; n < 2 && _out_n > 0; ++n)
+        {
+            bn::link::send(_out_q[0]);
+            for(int i = 1; i < _out_n; ++i) _out_q[i - 1] = _out_q[i];
+            --_out_n;
+        }
+        return;
+    }
+
     if(_backend == backend::universal)
     {
         if(! linkUniversal || ! linkUniversal->isConnected()) return;
-        // Two packets per frame keeps ship x/y responsive.
         for(int n = 0; n < 2 && _out_n > 0; ++n)
         {
             if(! linkUniversal->canSend()) break;
@@ -330,6 +355,34 @@ void link_net::_flush_outgoing()
         if(linkMobile->transfer(g_mobile_tx, &g_mobile_rx))
         {
             _mobile_transfer_busy = true;
+        }
+    }
+}
+
+void link_net::_pump_cable()
+{
+    for(int attempt = 0; attempt < 4; ++attempt)
+    {
+        auto state = bn::link::receive();
+        if(! state)
+        {
+            break;
+        }
+
+        _player_count = bn::max(_player_count, state->player_count());
+        _local_id = state->current_player_id();
+        _host = (_local_id == 0);
+        _connected = state->player_count() >= 2;
+
+        for(const bn::link_player& p : state->other_players())
+        {
+            _handle(int(p.data()));
+            const int id = p.id();
+            if(id >= 0 && id < max_players)
+            {
+                _remotes[id].active = true;
+                _remotes[id].last_seen = _age;
+            }
         }
     }
 }
@@ -420,7 +473,11 @@ void link_net::update()
     if(!_active) return;
     ++_age;
 
-    if(_backend == backend::universal)
+    if(_backend == backend::cable)
+    {
+        _pump_cable();
+    }
+    else if(_backend == backend::universal)
     {
         _pump_universal();
     }
@@ -489,24 +546,25 @@ unsigned link_net::shared_seed() const { return _seed; }
 
 const char* link_net::transport_status() const
 {
+    if(_backend == backend::cable)
+    {
+        return _connected ? "Cable linked" : "Waiting for cable peers";
+    }
+
     if(_backend == backend::universal && linkUniversal)
     {
         if(linkUniversal->isConnected())
         {
-            return using_wireless() ? "Wireless linked" : "Cable linked";
+            return "Wireless linked";
         }
-        if(using_wireless())
+        switch(linkUniversal->getWirelessState())
         {
-            switch(linkUniversal->getWirelessState())
-            {
-            case LinkWireless::State::SEARCHING: return "Scanning COSMIC rooms";
-            case LinkWireless::State::SERVING: return "Hosting COSMIC room";
-            case LinkWireless::State::CONNECTING: return "Joining COSMIC room";
-            case LinkWireless::State::CONNECTED: return "Wireless handshake";
-            default: return "Starting wireless";
-            }
+        case LinkWireless::State::SEARCHING: return "Scanning COSMIC rooms";
+        case LinkWireless::State::SERVING: return "Hosting COSMIC room";
+        case LinkWireless::State::CONNECTING: return "Joining COSMIC room";
+        case LinkWireless::State::CONNECTED: return "Wireless handshake";
+        default: return "Starting wireless";
         }
-        return "Waiting for cable peers";
     }
 
     if(_backend == backend::mobile && linkMobile)
