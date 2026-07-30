@@ -28,6 +28,13 @@ cp build/compile_commands.json .
 | START | Pause |
 | A+B+START+SELECT | Emergency restart to title |
 
+## Modes
+
+- **Play** — endless survival, escalating meteor storms
+- **Story** — five-chapter campaign with commander briefings
+- **Multiplayer** — battle royale duel (see backends below)
+- **Options** — music/SFX toggles, story progress reset (SRAM)
+
 ## Multiplayer backends
 
 Requires [gba-link-connection](https://github.com/afska/gba-link-connection) at the repo root:
