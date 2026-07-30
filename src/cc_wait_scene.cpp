@@ -131,13 +131,13 @@ scene_id wait_scene::update()
             }
             else
             {
-                _text.generate(0, 24, "Ready — wait for host", _sprites);
+                _text.generate(0, 24, "Ready - wait for host", _sprites);
             }
         }
         else
         {
             _countdown = 0;
-            _text.generate(0, 24, "Ready — waiting for peer", _sprites);
+            _text.generate(0, 24, "Ready - waiting for peer", _sprites);
         }
     }
     else if((_pulse / 20) % 2 == 0)
