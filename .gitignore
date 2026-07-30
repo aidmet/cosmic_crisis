@@ -27,5 +27,8 @@ __pycache__/
 *.pyc
 .venv/
 
-# Temp asset tools
+# Temp asset tools / previews
 tools/_*.py
+tools/_preview/
+tools/_preview_shaded/
+tools/_shaded_out/
