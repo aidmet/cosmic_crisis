@@ -5,6 +5,7 @@
 *.sav
 *.map
 *.iso
+*.sa2
 
 # Vendored / cloned deps (not required for Butano bn::link build)
 /gba-link-connection/
