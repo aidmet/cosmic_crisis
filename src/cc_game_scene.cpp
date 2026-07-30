@@ -282,7 +282,8 @@ void game_scene::_kill_meteor_slot(int slot, bool from_net, bool explode, bool a
         ++_passed;
     }
 
-    if(_is_multi() && ! from_net)
+    // Only the link host publishes meteor deaths; clients predict locally.
+    if(_is_multi() && ! from_net && net().host())
     {
         net().send_meteor_kill(slot, explode);
     }
@@ -291,6 +292,26 @@ void game_scene::_kill_meteor_slot(int slot, bool from_net, bool explode, bool a
 void game_scene::_apply_net_world()
 {
     if(! _is_multi()) return;
+
+    // Host is authority for the meteor field — never apply its own/peer meteor
+    // spawn-kill-pose traffic back onto itself (loopback or client spam).
+    if(net().host())
+    {
+        int slow_frames = 0;
+        if(net().poll_slow(slow_frames))
+        {
+            _slow_timer = slow_frames;
+        }
+        // Drain meteor events so they don't sit queued.
+        meteor_spawn_event ignore_spawn;
+        while(net().poll_meteor_spawn(ignore_spawn)) {}
+        int ignore_slot = 0;
+        bool ignore_explode = false;
+        while(net().poll_meteor_kill(ignore_slot, ignore_explode)) {}
+        meteor_pose_event ignore_pose;
+        while(net().poll_meteor_pose(ignore_pose)) {}
+        return;
+    }
 
     meteor_spawn_event spawn;
     while(net().poll_meteor_spawn(spawn))
@@ -576,7 +597,7 @@ void game_scene::_update_meteors()
             continue;
         }
 
-        // Remote pilots: destroy meteor so it doesn't ghost through them
+        // Remote pilots
         if(_is_multi())
         {
             const int local = net().local_id();
@@ -586,6 +607,7 @@ void game_scene::_update_meteors()
                 if(p == local) continue;
                 const remote_player& r = net().remote(p);
                 if(! r.active || ! r.alive) continue;
+                if(r.last_seen <= 0) continue;
                 dx = m.x - r.x;
                 dy = m.y - r.y;
                 if(dx * dx + dy * dy < rr * rr)
@@ -596,7 +618,8 @@ void game_scene::_update_meteors()
             }
             if(hit_remote)
             {
-                _kill_meteor_slot(i, false, false, false, false);
+                // Host publishes; clients only predict locally.
+                _kill_meteor_slot(i, ! net().host(), false, false, false);
             }
         }
     }

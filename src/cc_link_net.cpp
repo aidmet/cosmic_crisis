@@ -41,7 +41,7 @@ constexpr bn::fixed decode_y(int payload)
 
 constexpr int encode_mx(bn::fixed x)
 {
-    // meteor x roughly [-140, 140] → [0, 255]
+    // meteor x roughly [-140, 140]
     int v = (x + 140).right_shift_integer();
     return bn::clamp(v, 0, 255);
 }
