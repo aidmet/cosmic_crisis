@@ -70,35 +70,26 @@ scene_id wait_scene::update()
     if(current_game_mode() == game_mode::multi_wireless) mode_name = "Wireless Adapter";
     if(current_game_mode() == game_mode::multi_online) mode_name = "Online Relay";
 
-    _text.generate(0, -48, mode_name, _sprites);
-    _text.generate(0, -28, "Syncing pilots...", _sprites);
+    _text.generate(0, -40, mode_name, _sprites);
+    _text.generate(0, -20, "Waiting for pilots...", _sprites);
 
     bn::string<40> status;
     status = "Players: ";
     status += bn::to_string<8>(net().player_count());
-    _text.generate(0, -8, status, _sprites);
-
-    if(net().seed_ready())
-    {
-        _text.generate(0, 10, "Seed locked", _sprites);
-    }
-    else
-    {
-        _text.generate(0, 10, "Waiting seed...", _sprites);
-    }
+    _text.generate(0, 0, status, _sprites);
 
     if((_pulse / 20) % 2 == 0)
     {
-        _text.generate(0, 28, "B: cancel", _sprites);
+        _text.generate(0, 24, "B: cancel", _sprites);
     }
 
     if(current_game_mode() == game_mode::multi_online)
     {
-        _text.generate(0, 46, "Scanning mobile adapter...", _sprites);
+        _text.generate(0, 44, "Scanning mobile adapter...", _sprites);
     }
     else if(current_game_mode() == game_mode::multi_wireless)
     {
-        _text.generate(0, 46, "Broadcasting room COSMIC", _sprites);
+        _text.generate(0, 44, "Broadcasting room COSMIC", _sprites);
     }
 
     if(bn::keypad::b_pressed())
