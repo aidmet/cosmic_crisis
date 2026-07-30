@@ -20,12 +20,14 @@
 #include "bn_sprite_items_shield_fx.h"
 #include "bn_sprite_items_weapon_icons.h"
 #include "common_variable_8x16_sprite_font.h"
+#include "common_variable_8x8_sprite_font.h"
 
 namespace cc
 {
 
 game_scene::game_scene() :
-    _text(common::variable_8x16_sprite_font)
+    _text(common::variable_8x16_sprite_font),
+    _small_text(common::variable_8x8_sprite_font)
 {
 }
 
@@ -154,8 +156,8 @@ void game_scene::_rebuild_hud()
     if(_held != powerup_type::none)
     {
         _hud.push_back(bn::sprite_items::powerups.create_sprite(96, -72, int(_held)));
-        _text.set_center_alignment();
-        _text.generate(96, -56, _powerup_name(_held), _hud);
+        _small_text.set_center_alignment();
+        _small_text.generate(96, -58, _powerup_name(_held), _hud);
     }
     _hud.push_back(bn::sprite_items::weapon_icons.create_sprite(112, -72, int(_weapon)));
 
@@ -189,8 +191,8 @@ const char* game_scene::_powerup_name(powerup_type type)
 void game_scene::_set_pickup_label(pickup& p)
 {
     p.label.clear();
-    _text.set_center_alignment();
-    _text.generate(p.x, p.y + 12, _powerup_name(p.type), p.label);
+    _small_text.set_center_alignment();
+    _small_text.generate(p.x, p.y + 10, _powerup_name(p.type), p.label);
 }
 
 void game_scene::_spawn_meteor()
@@ -530,7 +532,7 @@ void game_scene::_update_player()
         _fire();
     }
 
-    if(bn::keypad::r_pressed())
+    if(bn::keypad::select_pressed() || bn::keypad::r_pressed())
     {
         _use_powerup();
     }

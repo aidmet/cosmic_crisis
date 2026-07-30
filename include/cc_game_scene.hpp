@@ -94,6 +94,7 @@ private:
     bn::optional<bn::sprite_ptr> _shield_fx;
     bn::optional<bn::sprite_ptr> _remote_ships[max_players];
     bn::sprite_text_generator _text;
+    bn::sprite_text_generator _small_text;
     bn::vector<bn::sprite_ptr, 56> _hud;
     bn::vector<bn::sprite_ptr, 8> _hearts;
 

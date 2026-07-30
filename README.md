@@ -24,7 +24,7 @@ cp build/compile_commands.json .
 | D-pad | Move / menu |
 | A | Confirm / fire |
 | B | Back / brake |
-| R | Use held power-up |
+| R / SELECT | Use held power-up |
 | START | Pause |
 | A+B+START+SELECT | Emergency restart to title |
 
