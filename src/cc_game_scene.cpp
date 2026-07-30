@@ -77,6 +77,14 @@ void game_scene::enter()
     _toast_timer = 0;
     _toast_text = nullptr;
     _chapter_goal = 30 + campaign_chapter() * 18;
+    _meteor_seq = 0;
+    _engine_frame = 0;
+
+    if(_is_multi())
+    {
+        // Re-seed in case anything touched RNG after the lobby handshake.
+        seed_world_rng(net().shared_seed());
+    }
 
     int local = _is_multi() ? net().local_id() : 0;
     _ship = bn::sprite_items::ships.create_sprite(_x, _y, local);
@@ -174,32 +182,25 @@ void game_scene::_set_pickup_label(pickup& p)
 
 void game_scene::_spawn_meteor()
 {
-    for(int i = 0; i < max_meteors; ++i)
+    // Round-robin slots so both multi peers stay on the same sequence even if
+    // local collisions temporarily diverge.
+    const int slot = _meteor_seq % max_meteors;
+    ++_meteor_seq;
+
+    bn::random& stream = _is_multi() ? world_rng() : rng();
+    const int size = (stream.get_unbiased_int(5) == 0) ? 1 : 0;
+    const bn::fixed y = bn::fixed(stream.get_unbiased_int(120)) - 60;
+    const int difficulty = _is_multi() ? (1 + _engine_frame / 1800) : _level;
+    bn::fixed speed = bn::fixed(1.2) + bn::fixed(difficulty) * bn::fixed(0.18);
+    if(_is_campaign())
     {
-        if(_meteors[i].active)
-        {
-            continue;
-        }
-
-        const int size = (rng().get_unbiased_int(5) == 0) ? 1 : 0;
-        const bn::fixed y = bn::fixed(rng().get_unbiased_int(120)) - 60;
-        bn::fixed speed = bn::fixed(1.2) + bn::fixed(_level) * bn::fixed(0.18);
-        if(_is_campaign())
-        {
-            speed += bn::fixed(campaign_chapter()) * bn::fixed(0.15);
-        }
-        const bn::fixed vx = -speed - bn::fixed(rng().get_unbiased_int(8)) / 10;
-        const bn::fixed vy = bn::fixed(rng().get_unbiased_int(7) - 3) / 10;
-        const int frame = rng().get_unbiased_int(4);
-
-        _spawn_meteor_slot(i, size, y, vx, vy, frame);
-
-        if(_is_multi() && net().host())
-        {
-            net().send_meteor_spawn(i, size, y, vx, vy, frame);
-        }
-        return;
+        speed += bn::fixed(campaign_chapter()) * bn::fixed(0.15);
     }
+    const bn::fixed vx = -speed - bn::fixed(stream.get_unbiased_int(8)) / 10;
+    const bn::fixed vy = bn::fixed(stream.get_unbiased_int(7) - 3) / 10;
+    const int frame = stream.get_unbiased_int(4);
+
+    _spawn_meteor_slot(slot, size, y, vx, vy, frame);
 }
 
 void game_scene::_spawn_meteor_slot(int slot, int size, bn::fixed y, bn::fixed vx, bn::fixed vy, int frame)
@@ -227,7 +228,7 @@ void game_scene::_spawn_meteor_slot(int slot, int size, bn::fixed y, bn::fixed v
     }
 }
 
-void game_scene::_kill_meteor_slot(int slot, bool from_net, bool explode, bool allow_drop, bool count_progress)
+void game_scene::_kill_meteor_slot(int slot, bool explode, bool allow_drop, bool count_progress)
 {
     if(slot < 0 || slot >= max_meteors) return;
     meteor& m = _meteors[slot];
@@ -254,7 +255,8 @@ void game_scene::_kill_meteor_slot(int slot, bool from_net, bool explode, bool a
         }
     }
 
-    if(allow_drop && (!_is_multi() || net().host()) && rng().get_unbiased_int(100) < 18)
+    // Pickups use RNG — skip in multi so both peers keep an identical stream.
+    if(allow_drop && ! _is_multi() && rng().get_unbiased_int(100) < 18)
     {
         for(auto& p : _pickups)
         {
@@ -281,64 +283,11 @@ void game_scene::_kill_meteor_slot(int slot, bool from_net, bool explode, bool a
         }
         ++_passed;
     }
-
-    // Only the link host publishes meteor deaths; clients predict locally.
-    if(_is_multi() && ! from_net && net().host())
-    {
-        net().send_meteor_kill(slot, explode);
-    }
 }
 
 void game_scene::_apply_net_world()
 {
     if(! _is_multi()) return;
-
-    // Host is authority for the meteor field — never apply its own/peer meteor
-    // spawn-kill-pose traffic back onto itself (loopback or client spam).
-    if(net().host())
-    {
-        int slow_frames = 0;
-        if(net().poll_slow(slow_frames))
-        {
-            _slow_timer = slow_frames;
-        }
-        // Drain meteor events so they don't sit queued.
-        meteor_spawn_event ignore_spawn;
-        while(net().poll_meteor_spawn(ignore_spawn)) {}
-        int ignore_slot = 0;
-        bool ignore_explode = false;
-        while(net().poll_meteor_kill(ignore_slot, ignore_explode)) {}
-        meteor_pose_event ignore_pose;
-        while(net().poll_meteor_pose(ignore_pose)) {}
-        return;
-    }
-
-    meteor_spawn_event spawn;
-    while(net().poll_meteor_spawn(spawn))
-    {
-        _spawn_meteor_slot(spawn.slot, spawn.size, spawn.y, spawn.vx, spawn.vy, spawn.frame);
-    }
-
-    int kill_slot = 0;
-    bool kill_explode = false;
-    while(net().poll_meteor_kill(kill_slot, kill_explode))
-    {
-        _kill_meteor_slot(kill_slot, true, kill_explode, false, kill_explode);
-    }
-
-    meteor_pose_event pose;
-    while(net().poll_meteor_pose(pose))
-    {
-        if(pose.slot < 0 || pose.slot >= max_meteors) continue;
-        meteor& m = _meteors[pose.slot];
-        if(! m.active) continue;
-        m.x = pose.x;
-        m.y = pose.y;
-        if(m.sprite)
-        {
-            m.sprite->set_position(m.x, m.y);
-        }
-    }
 
     int slow_frames = 0;
     if(net().poll_slow(slow_frames))
@@ -415,6 +364,12 @@ void game_scene::_use_powerup()
         }
         break;
     case powerup_type::clear:
+        if(_is_multi())
+        {
+            _slow_timer = 60 * 2;
+            net().send_slow(_slow_timer);
+            break;
+        }
         for(int i = 0; i < max_meteors; ++i)
         {
             meteor& m = _meteors[i];
@@ -423,7 +378,7 @@ void game_scene::_use_powerup()
             bn::fixed dy = m.y - _y;
             if(dx * dx + dy * dy < bn::fixed(55 * 55))
             {
-                _kill_meteor_slot(i, false, true, false, true);
+                _kill_meteor_slot(i, true, false, true);
             }
         }
         break;
@@ -553,7 +508,8 @@ void game_scene::_update_player()
 
 void game_scene::_update_meteors()
 {
-    bn::fixed slow = _slow_timer > 0 ? bn::fixed(0.45) : bn::fixed(1);
+    // In multi, meteors must stay lockstep — never slow one peer's field alone.
+    bn::fixed slow = (!_is_multi() && _slow_timer > 0) ? bn::fixed(0.45) : bn::fixed(1);
 
     for(int i = 0; i < max_meteors; ++i)
     {
@@ -581,7 +537,7 @@ void game_scene::_update_meteors()
 
         if(m.x < -140)
         {
-            _kill_meteor_slot(i, false, false, false, true);
+            _kill_meteor_slot(i, false, false, true);
             continue;
         }
 
@@ -592,50 +548,16 @@ void game_scene::_update_meteors()
         bn::fixed dy = m.y - _y;
         if(dx * dx + dy * dy < rr * rr)
         {
-            _kill_meteor_slot(i, false, false, false, false);
+            // Multi: damage only — destroying here desyncs the shared field.
+            if(! _is_multi())
+            {
+                _kill_meteor_slot(i, false, false, false);
+            }
             _hit_player();
             continue;
         }
 
-        // Remote pilots
-        if(_is_multi())
-        {
-            const int local = net().local_id();
-            bool hit_remote = false;
-            for(int p = 0; p < max_players; ++p)
-            {
-                if(p == local) continue;
-                const remote_player& r = net().remote(p);
-                if(! r.active || ! r.alive) continue;
-                if(r.last_seen <= 0) continue;
-                dx = m.x - r.x;
-                dy = m.y - r.y;
-                if(dx * dx + dy * dy < rr * rr)
-                {
-                    hit_remote = true;
-                    break;
-                }
-            }
-            if(hit_remote)
-            {
-                // Host publishes; clients only predict locally.
-                _kill_meteor_slot(i, ! net().host(), false, false, false);
-            }
-        }
-    }
-
-    // Host streams positions sparsely so spawn/kill packets aren't starved.
-    if(_is_multi() && net().host() && (_engine_frame % 16) == 0)
-    {
-        for(int tries = 0; tries < max_meteors; ++tries)
-        {
-            const int idx = (_engine_frame / 16 + tries) % max_meteors;
-            if(_meteors[idx].active)
-            {
-                net().send_meteor_pose(idx, _meteors[idx].x, _meteors[idx].y);
-                break;
-            }
-        }
+        // Remote pilots — damage is owned by that peer; do not mutate the field.
     }
 }
 
@@ -664,13 +586,20 @@ void game_scene::_update_bullets()
             bn::fixed dy = m.y - b.y;
             if(dx * dx + dy * dy < rr * rr)
             {
+                // Multi keeps the shared meteor field intact; bullets are juicers only.
+                if(_is_multi())
+                {
+                    b.active = false;
+                    b.sprite.reset();
+                    break;
+                }
                 int dmg = (b.kind == 2) ? 3 : 1;
                 m.hp -= dmg;
                 b.active = false;
                 b.sprite.reset();
                 if(m.hp <= 0)
                 {
-                    _kill_meteor_slot(mi, false, true, true, true);
+                    _kill_meteor_slot(mi, true, true, true);
                 }
                 break;
             }
@@ -848,8 +777,12 @@ scene_id game_scene::update()
 
     if(bn::keypad::start_pressed())
     {
-        _paused = ! _paused;
-        _rebuild_hud();
+        // Pausing freezes only one peer and breaks the lockstep meteor field.
+        if(! _is_multi())
+        {
+            _paused = ! _paused;
+            _rebuild_hud();
+        }
     }
 
     if(_paused)
@@ -874,15 +807,12 @@ scene_id game_scene::update()
     _update_remote();
     _apply_net_world();
 
-    int spawn_every = bn::max(18, 50 - _level * 3);
+    int spawn_every = _is_multi() ? 28 : bn::max(18, 50 - _level * 3);
     if(++_spawn_timer >= spawn_every)
     {
         _spawn_timer = 0;
-        // Host owns meteor spawns in multiplayer so both screens share the field.
-        if(! _is_multi() || net().host())
-        {
-            _spawn_meteor();
-        }
+        // Both peers simulate the same meteor field from the shared lobby seed.
+        _spawn_meteor();
     }
 
     _update_meteors();

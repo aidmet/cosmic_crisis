@@ -24,6 +24,8 @@ void wait_scene::enter()
     _timer = 0;
     _pulse = 0;
     _lobby_seed = 0;
+    _armed = false;
+    _countdown = 0;
 
     int max_p = 4;
     if(current_game_mode() == game_mode::multi_wireless)
@@ -38,6 +40,19 @@ void wait_scene::leave()
 {
     _stars.reset();
     _sprites.clear();
+}
+
+namespace
+{
+
+scene_id launch_match(unsigned seed)
+{
+    if(seed == 0) seed = 0xC051Cu;
+    seed_rng(seed);
+    seed_world_rng(seed);
+    return scene_id::game;
+}
+
 }
 
 scene_id wait_scene::update()
@@ -78,9 +93,74 @@ scene_id wait_scene::update()
     status += bn::to_string<8>(net().player_count());
     _text.generate(0, 0, status, _sprites);
 
-    if((_pulse / 20) % 2 == 0)
+    if(bn::keypad::b_pressed())
+    {
+        net().stop();
+        return scene_id::multiplayer_menu;
+    }
+
+    // Client: host decides the exact launch frame via go packet.
+    if(! net().host() && net().poll_go())
+    {
+        return launch_match(net().shared_seed());
+    }
+
+    // Arm when lobby is stable (or Start). Both sides must arm before launch.
+    bool can_arm = net().lobby_ready() && _timer > 90;
+    if(! _armed && can_arm && (_timer > 150 || bn::keypad::start_pressed()))
+    {
+        _armed = true;
+    }
+
+    if(_armed)
+    {
+        net().send_ready();
+        if(net().host() && _lobby_seed != 0)
+        {
+            net().send_seed(_lobby_seed);
+        }
+
+        if(net().peers_ready())
+        {
+            if(net().host())
+            {
+                if(_countdown <= 0)
+                {
+                    _countdown = 60;
+                }
+            }
+            else
+            {
+                _text.generate(0, 24, "Ready — wait for host", _sprites);
+            }
+        }
+        else
+        {
+            _countdown = 0;
+            _text.generate(0, 24, "Ready — waiting for peer", _sprites);
+        }
+    }
+    else if((_pulse / 20) % 2 == 0)
     {
         _text.generate(0, 24, "B: cancel", _sprites);
+    }
+
+    if(net().host() && _countdown > 0)
+    {
+        --_countdown;
+        bn::string<24> go = "Launch in ";
+        go += bn::to_string<8>((_countdown / 20) + 1);
+        _text.generate(0, 24, go, _sprites);
+
+        if(_countdown == 0)
+        {
+            unsigned seed = _lobby_seed ? _lobby_seed : 0xC051Cu;
+            net().send_seed(seed);
+            net().send_go();
+            // Flush go immediately — do not wait a frame for the queue.
+            net().update();
+            return launch_match(seed);
+        }
     }
 
     if(current_game_mode() == game_mode::multi_online)
@@ -90,35 +170,6 @@ scene_id wait_scene::update()
     else if(current_game_mode() == game_mode::multi_wireless)
     {
         _text.generate(0, 44, "Broadcasting room COSMIC", _sprites);
-    }
-
-    if(bn::keypad::b_pressed())
-    {
-        net().stop();
-        return scene_id::multiplayer_menu;
-    }
-
-    // Harder sync gate: connected + shared seed + stable lobby window.
-    bool ready = net().lobby_ready() && _timer > 150;
-    bool force = net().lobby_ready() && bn::keypad::start_pressed() && _timer > 60;
-    if(ready || force)
-    {
-        if(net().host())
-        {
-            if(_lobby_seed == 0)
-            {
-                _lobby_seed = unsigned(_timer) * 2654435761u;
-                if(_lobby_seed == 0) _lobby_seed = 0xC051Cu;
-            }
-            net().send_seed(_lobby_seed);
-            seed_rng(_lobby_seed);
-        }
-        else
-        {
-            seed_rng(net().shared_seed());
-        }
-        net().send_ready();
-        return scene_id::game;
     }
 
     return scene_id::link_wait;

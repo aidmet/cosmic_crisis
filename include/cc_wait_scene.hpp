@@ -27,6 +27,8 @@ private:
     int _timer = 0;
     int _pulse = 0;
     unsigned _lobby_seed = 0;
+    bool _armed = false;
+    int _countdown = 0;
 };
 
 } // namespace cc
