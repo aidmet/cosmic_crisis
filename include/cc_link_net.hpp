@@ -25,7 +25,12 @@ enum class net_msg : int
     seed_lo = 7,
     seed_hi = 8,
     tick = 9,
-    lives = 10
+    lives = 10,
+    meteor_a = 11, // slot + size + frame
+    meteor_b = 12, // y
+    meteor_c = 13, // vx/vy quantized
+    meteor_kill = 14,
+    slow = 15
 };
 
 struct remote_player
@@ -39,6 +44,16 @@ struct remote_player
     int weapon = 0;
     int pending_fire = 0;
     int last_seen = 0;
+};
+
+struct meteor_spawn_event
+{
+    int slot = 0;
+    int size = 0;
+    int frame = 0;
+    bn::fixed y = 0;
+    bn::fixed vx = -1;
+    bn::fixed vy = 0;
 };
 
 class link_net
@@ -63,6 +78,9 @@ public:
     void send_fire(bn::fixed y, int weapon);
     void send_dead();
     void send_tick(int tick);
+    void send_meteor_spawn(int slot, int size, bn::fixed y, bn::fixed vx, bn::fixed vy, int frame);
+    void send_meteor_kill(int slot, bool explode = true);
+    void send_slow(int frames);
 
     [[nodiscard]] const remote_player& remote(int id) const;
     remote_player& remote_mut(int id);
@@ -72,11 +90,15 @@ public:
     [[nodiscard]] bool using_online() const;
 
     int consume_fire(int id);
+    [[nodiscard]] bool poll_meteor_spawn(meteor_spawn_event& out);
+    [[nodiscard]] bool poll_meteor_kill(int& slot, bool& explode);
+    [[nodiscard]] bool poll_slow(int& frames);
 
 private:
     void _pump_bn_link();
     void _handle(int raw);
     void _mark_seen(int player);
+    void _finish_meteor_spawn();
 
     game_mode _mode = game_mode::multi_cable;
     bool _active = false;
@@ -95,6 +117,25 @@ private:
     remote_player _remotes[max_players];
     int _timeout = 0;
     int _send_phase = 0;
+
+    // Incoming meteor spawn assembly (3 packets)
+    int _m_a = -1;
+    int _m_size = 0;
+    int _m_frame = 0;
+    int _m_y = 0;
+    bool _m_have_a = false;
+    bool _m_have_b = false;
+    bool _m_have_c = false;
+    int _m_vxq = 0;
+    int _m_vyq = 0;
+
+    bool _spawn_ready = false;
+    meteor_spawn_event _spawn_event;
+    bool _kill_ready = false;
+    int _kill_slot = 0;
+    bool _kill_explode = true;
+    bool _slow_ready = false;
+    int _slow_frames = 0;
 };
 
 link_net& net();

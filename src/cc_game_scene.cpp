@@ -174,36 +174,141 @@ void game_scene::_set_pickup_label(pickup& p)
 
 void game_scene::_spawn_meteor()
 {
-    for(auto& m : _meteors)
+    for(int i = 0; i < max_meteors; ++i)
     {
-        if(m.active)
+        if(_meteors[i].active)
         {
             continue;
         }
 
-        m.active = true;
-        m.size = (rng().get_unbiased_int(5) == 0) ? 1 : 0;
-        m.hp = m.size ? 3 : 1;
-        m.x = 140;
-        m.y = bn::fixed(rng().get_unbiased_int(120)) - 60;
+        const int size = (rng().get_unbiased_int(5) == 0) ? 1 : 0;
+        const bn::fixed y = bn::fixed(rng().get_unbiased_int(120)) - 60;
         bn::fixed speed = bn::fixed(1.2) + bn::fixed(_level) * bn::fixed(0.18);
         if(_is_campaign())
         {
             speed += bn::fixed(campaign_chapter()) * bn::fixed(0.15);
         }
-        m.vx = -speed - bn::fixed(rng().get_unbiased_int(8)) / 10;
-        m.vy = bn::fixed(rng().get_unbiased_int(7) - 3) / 10;
-        m.frame = rng().get_unbiased_int(4);
-        m.anim = 0;
-        if(m.size)
+        const bn::fixed vx = -speed - bn::fixed(rng().get_unbiased_int(8)) / 10;
+        const bn::fixed vy = bn::fixed(rng().get_unbiased_int(7) - 3) / 10;
+        const int frame = rng().get_unbiased_int(4);
+
+        _spawn_meteor_slot(i, size, y, vx, vy, frame);
+
+        if(_is_multi() && net().host())
         {
-            m.sprite = bn::sprite_items::meteor32.create_sprite(m.x, m.y, m.frame);
+            net().send_meteor_spawn(i, size, y, vx, vy, frame);
+        }
+        return;
+    }
+}
+
+void game_scene::_spawn_meteor_slot(int slot, int size, bn::fixed y, bn::fixed vx, bn::fixed vy, int frame)
+{
+    if(slot < 0 || slot >= max_meteors) return;
+
+    meteor& m = _meteors[slot];
+    m.sprite.reset();
+    m.active = true;
+    m.size = size ? 1 : 0;
+    m.hp = m.size ? 3 : 1;
+    m.x = 140;
+    m.y = y;
+    m.vx = vx;
+    m.vy = vy;
+    m.frame = frame & 3;
+    m.anim = 0;
+    if(m.size)
+    {
+        m.sprite = bn::sprite_items::meteor32.create_sprite(m.x, m.y, m.frame);
+    }
+    else
+    {
+        m.sprite = bn::sprite_items::meteor16.create_sprite(m.x, m.y, m.frame);
+    }
+}
+
+void game_scene::_kill_meteor_slot(int slot, bool from_net, bool explode, bool allow_drop, bool count_progress)
+{
+    if(slot < 0 || slot >= max_meteors) return;
+    meteor& m = _meteors[slot];
+    if(! m.active) return;
+
+    const bn::fixed mx = m.x;
+    const bn::fixed my = m.y;
+    const int msize = m.size;
+
+    m.active = false;
+    m.sprite.reset();
+
+    if(explode)
+    {
+        for(auto& e : _blasts)
+        {
+            if(e.active) continue;
+            e.active = true;
+            e.age = 0;
+            e.sprite = bn::sprite_items::explosion.create_sprite(mx, my, 0);
+            e.anim = bn::create_sprite_animate_action_once(
+                *e.sprite, 3, bn::sprite_items::explosion.tiles_item(), 0, 1, 2, 3);
+            break;
+        }
+    }
+
+    if(allow_drop && (!_is_multi() || net().host()) && rng().get_unbiased_int(100) < 18)
+    {
+        for(auto& p : _pickups)
+        {
+            if(p.active) continue;
+            p.active = true;
+            p.x = mx;
+            p.y = my;
+            p.type = powerup_type(rng().get_unbiased_int(5));
+            p.sprite = bn::sprite_items::powerups.create_sprite(p.x, p.y, int(p.type));
+            _set_pickup_label(p);
+            break;
+        }
+    }
+
+    if(count_progress)
+    {
+        if(explode)
+        {
+            _score += 25 + msize * 25;
         }
         else
         {
-            m.sprite = bn::sprite_items::meteor16.create_sprite(m.x, m.y, m.frame);
+            _score += 10;
         }
-        return;
+        ++_passed;
+    }
+
+    if(_is_multi() && ! from_net)
+    {
+        net().send_meteor_kill(slot, explode);
+    }
+}
+
+void game_scene::_apply_net_world()
+{
+    if(! _is_multi()) return;
+
+    meteor_spawn_event spawn;
+    while(net().poll_meteor_spawn(spawn))
+    {
+        _spawn_meteor_slot(spawn.slot, spawn.size, spawn.y, spawn.vx, spawn.vy, spawn.frame);
+    }
+
+    int kill_slot = 0;
+    bool kill_explode = false;
+    while(net().poll_meteor_kill(kill_slot, kill_explode))
+    {
+        _kill_meteor_slot(kill_slot, true, kill_explode, false, kill_explode);
+    }
+
+    int slow_frames = 0;
+    if(net().poll_slow(slow_frames))
+    {
+        _slow_timer = slow_frames;
     }
 }
 
@@ -269,29 +374,21 @@ void game_scene::_use_powerup()
         break;
     case powerup_type::slow:
         _slow_timer = 60 * 3;
+        if(_is_multi())
+        {
+            net().send_slow(_slow_timer);
+        }
         break;
     case powerup_type::clear:
-        for(auto& m : _meteors)
+        for(int i = 0; i < max_meteors; ++i)
         {
-            if(! m.active || ! m.sprite) continue;
+            meteor& m = _meteors[i];
+            if(! m.active) continue;
             bn::fixed dx = m.x - _x;
             bn::fixed dy = m.y - _y;
             if(dx * dx + dy * dy < bn::fixed(55 * 55))
             {
-                m.active = false;
-                for(auto& e : _blasts)
-                {
-                    if(e.active) continue;
-                    e.active = true;
-                    e.age = 0;
-                    e.sprite = bn::sprite_items::explosion.create_sprite(m.x, m.y, 0);
-                    e.anim = bn::create_sprite_animate_action_once(
-                        *e.sprite, 4, bn::sprite_items::explosion.tiles_item(), 0, 1, 2, 3);
-                    break;
-                }
-                m.sprite.reset();
-                _score += 50;
-                ++_passed;
+                _kill_meteor_slot(i, false, true, false, true);
             }
         }
         break;
@@ -423,8 +520,9 @@ void game_scene::_update_meteors()
 {
     bn::fixed slow = _slow_timer > 0 ? bn::fixed(0.45) : bn::fixed(1);
 
-    for(auto& m : _meteors)
+    for(int i = 0; i < max_meteors; ++i)
     {
+        meteor& m = _meteors[i];
         if(! m.active)
         {
             continue;
@@ -448,10 +546,7 @@ void game_scene::_update_meteors()
 
         if(m.x < -140)
         {
-            m.active = false;
-            m.sprite.reset();
-            ++_passed;
-            _score += 10;
+            _kill_meteor_slot(i, false, false, false, true);
             continue;
         }
 
@@ -461,8 +556,7 @@ void game_scene::_update_meteors()
         bn::fixed dy = m.y - _y;
         if(dx * dx + dy * dy < rr * rr)
         {
-            m.active = false;
-            m.sprite.reset();
+            _kill_meteor_slot(i, false, false, false, false);
             _hit_player();
         }
     }
@@ -484,8 +578,9 @@ void game_scene::_update_bullets()
             continue;
         }
 
-        for(auto& m : _meteors)
+        for(int mi = 0; mi < max_meteors; ++mi)
         {
+            meteor& m = _meteors[mi];
             if(! m.active) continue;
             bn::fixed rr = m.size ? bn::fixed(14) : bn::fixed(8);
             bn::fixed dx = m.x - b.x;
@@ -498,35 +593,7 @@ void game_scene::_update_bullets()
                 b.sprite.reset();
                 if(m.hp <= 0)
                 {
-                    m.active = false;
-                    for(auto& e : _blasts)
-                    {
-                        if(e.active) continue;
-                        e.active = true;
-                        e.age = 0;
-                        e.sprite = bn::sprite_items::explosion.create_sprite(m.x, m.y, 0);
-                        e.anim = bn::create_sprite_animate_action_once(
-                            *e.sprite, 3, bn::sprite_items::explosion.tiles_item(), 0, 1, 2, 3);
-                        break;
-                    }
-                    // chance drop
-                    if(rng().get_unbiased_int(100) < 18)
-                    {
-                        for(auto& p : _pickups)
-                        {
-                            if(p.active) continue;
-                            p.active = true;
-                            p.x = m.x;
-                            p.y = m.y;
-                            p.type = powerup_type(rng().get_unbiased_int(5));
-                            p.sprite = bn::sprite_items::powerups.create_sprite(p.x, p.y, int(p.type));
-                            _set_pickup_label(p);
-                            break;
-                        }
-                    }
-                    m.sprite.reset();
-                    _score += 25 + m.size * 25;
-                    ++_passed;
+                    _kill_meteor_slot(mi, false, true, true, true);
                 }
                 break;
             }
@@ -733,12 +800,17 @@ scene_id game_scene::update()
 
     _update_player();
     _update_remote();
+    _apply_net_world();
 
     int spawn_every = bn::max(18, 50 - _level * 3);
     if(++_spawn_timer >= spawn_every)
     {
         _spawn_timer = 0;
-        _spawn_meteor();
+        // Host owns meteor spawns in multiplayer so both screens share the field.
+        if(! _is_multi() || net().host())
+        {
+            _spawn_meteor();
+        }
     }
 
     _update_meteors();

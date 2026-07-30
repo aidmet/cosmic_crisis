@@ -65,6 +65,10 @@ void link_net::start(game_mode mode, int max_players_wanted)
     _seed_hi = 0;
     _timeout = 0;
     _send_phase = 0;
+    _m_have_a = _m_have_b = _m_have_c = false;
+    _spawn_ready = false;
+    _kill_ready = false;
+    _slow_ready = false;
     for(int i = 0; i < max_players; ++i)
     {
         _remotes[i] = remote_player();
@@ -173,15 +177,67 @@ void link_net::_handle(int raw)
         }
         break;
 
+    case net_msg::meteor_a:
+        _m_a = payload & 0x1F;
+        _m_size = (payload >> 5) & 1;
+        _m_frame = (payload >> 6) & 3;
+        _m_have_a = true;
+        _m_have_b = false;
+        _m_have_c = false;
+        break;
+
+    case net_msg::meteor_b:
+        _m_y = payload;
+        _m_have_b = true;
+        if(_m_have_a && _m_have_b && _m_have_c)
+        {
+            _finish_meteor_spawn();
+        }
+        break;
+
+    case net_msg::meteor_c:
+        _m_vxq = payload & 0xF;
+        _m_vyq = (payload >> 4) & 0xF;
+        _m_have_c = true;
+        if(_m_have_a && _m_have_b && _m_have_c)
+        {
+            _finish_meteor_spawn();
+        }
+        break;
+
+    case net_msg::meteor_kill:
+        _kill_slot = payload & 0x1F;
+        _kill_explode = ((payload >> 5) & 1) != 0;
+        _kill_ready = true;
+        break;
+
+    case net_msg::slow:
+        _slow_frames = payload;
+        if(_slow_frames <= 0) _slow_frames = 180;
+        _slow_ready = true;
+        break;
+
     default:
         break;
     }
 }
 
+void link_net::_finish_meteor_spawn()
+{
+    _spawn_event.slot = _m_a;
+    _spawn_event.size = _m_size;
+    _spawn_event.frame = _m_frame;
+    _spawn_event.y = decode_y(_m_y);
+    _spawn_event.vx = -(bn::fixed(10) + bn::fixed(_m_vxq) * bn::fixed(15)) / 10;
+    _spawn_event.vy = (bn::fixed(_m_vyq) - 5) / 10;
+    _spawn_ready = true;
+    _m_have_a = _m_have_b = _m_have_c = false;
+}
+
 void link_net::_pump_bn_link()
 {
-    // Drain multiple receive slots per frame for tighter sync.
-    for(int attempt = 0; attempt < 4; ++attempt)
+    // Drain more receive slots so multi-packet meteor spawns land same frame.
+    for(int attempt = 0; attempt < 8; ++attempt)
     {
         auto state = bn::link::receive();
         if(! state)
@@ -342,6 +398,33 @@ void link_net::send_tick(int tick)
     bn::link::send(pack(_local_id, net_msg::tick, _host_tick));
 }
 
+void link_net::send_meteor_spawn(int slot, int size, bn::fixed y, bn::fixed vx, bn::fixed vy, int frame)
+{
+    const int a = (slot & 0x1F) | ((size & 1) << 5) | ((frame & 3) << 6);
+    const int b = encode_y(y);
+    int vxq = (-vx * 10 - 10).right_shift_integer();
+    vxq = bn::clamp(vxq, 0, 15);
+    int vyq = (vy * 10 + 5).right_shift_integer();
+    vyq = bn::clamp(vyq, 0, 15);
+    const int c = (vxq & 0xF) | ((vyq & 0xF) << 4);
+
+    bn::link::send(pack(_local_id, net_msg::meteor_a, a));
+    bn::link::send(pack(_local_id, net_msg::meteor_b, b));
+    bn::link::send(pack(_local_id, net_msg::meteor_c, c));
+}
+
+void link_net::send_meteor_kill(int slot, bool explode)
+{
+    int payload = slot & 0x1F;
+    if(explode) payload |= 0x20;
+    bn::link::send(pack(_local_id, net_msg::meteor_kill, payload));
+}
+
+void link_net::send_slow(int frames)
+{
+    bn::link::send(pack(_local_id, net_msg::slow, bn::clamp(frames, 1, 255)));
+}
+
 const remote_player& link_net::remote(int id) const
 {
     return _remotes[bn::clamp(id, 0, max_players - 1)];
@@ -373,6 +456,31 @@ int link_net::consume_fire(int id)
     int n = r.pending_fire;
     r.pending_fire = 0;
     return n;
+}
+
+bool link_net::poll_meteor_spawn(meteor_spawn_event& out)
+{
+    if(! _spawn_ready) return false;
+    out = _spawn_event;
+    _spawn_ready = false;
+    return true;
+}
+
+bool link_net::poll_meteor_kill(int& slot, bool& explode)
+{
+    if(! _kill_ready) return false;
+    slot = _kill_slot;
+    explode = _kill_explode;
+    _kill_ready = false;
+    return true;
+}
+
+bool link_net::poll_slow(int& frames)
+{
+    if(! _slow_ready) return false;
+    frames = _slow_frames;
+    _slow_ready = false;
+    return true;
 }
 
 } // namespace cc

@@ -67,6 +67,9 @@ private:
     };
 
     void _spawn_meteor();
+    void _spawn_meteor_slot(int slot, int size, bn::fixed y, bn::fixed vx, bn::fixed vy, int frame);
+    void _kill_meteor_slot(int slot, bool from_net, bool explode, bool allow_drop, bool count_progress);
+    void _apply_net_world();
     void _fire();
     void _use_powerup();
     void _hit_player();
