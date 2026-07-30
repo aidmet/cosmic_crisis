@@ -26,6 +26,7 @@ private:
     bn::vector<bn::sprite_ptr, 48> _sprites;
     int _timer = 0;
     int _pulse = 0;
+    unsigned _lobby_seed = 0;
 };
 
 } // namespace cc

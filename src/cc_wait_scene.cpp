@@ -23,6 +23,7 @@ void wait_scene::enter()
     _stars.emplace(bn::regular_bg_items::starfield);
     _timer = 0;
     _pulse = 0;
+    _lobby_seed = 0;
 
     int max_p = 4;
     if(current_game_mode() == game_mode::multi_wireless)
@@ -48,6 +49,20 @@ scene_id wait_scene::update()
     ++_timer;
     ++_pulse;
 
+    // Host locks one seed and rebroadcasts it so clients converge.
+    if(net().host() && net().is_connected())
+    {
+        if(_lobby_seed == 0)
+        {
+            _lobby_seed = unsigned(_timer) * 2654435761u;
+            if(_lobby_seed == 0) _lobby_seed = 0xC051Cu;
+        }
+        if((_timer % 8) == 0)
+        {
+            net().send_seed(_lobby_seed);
+        }
+    }
+
     _sprites.clear();
     _text.set_center_alignment();
 
@@ -55,26 +70,35 @@ scene_id wait_scene::update()
     if(current_game_mode() == game_mode::multi_wireless) mode_name = "Wireless Adapter";
     if(current_game_mode() == game_mode::multi_online) mode_name = "Online Relay";
 
-    _text.generate(0, -40, mode_name, _sprites);
-    _text.generate(0, -20, "Waiting for pilots...", _sprites);
+    _text.generate(0, -48, mode_name, _sprites);
+    _text.generate(0, -28, "Syncing pilots...", _sprites);
 
     bn::string<40> status;
     status = "Players: ";
     status += bn::to_string<8>(net().player_count());
-    _text.generate(0, 0, status, _sprites);
+    _text.generate(0, -8, status, _sprites);
+
+    if(net().seed_ready())
+    {
+        _text.generate(0, 10, "Seed locked", _sprites);
+    }
+    else
+    {
+        _text.generate(0, 10, "Waiting seed...", _sprites);
+    }
 
     if((_pulse / 20) % 2 == 0)
     {
-        _text.generate(0, 24, "B: cancel", _sprites);
+        _text.generate(0, 28, "B: cancel", _sprites);
     }
 
     if(current_game_mode() == game_mode::multi_online)
     {
-        _text.generate(0, 44, "Scanning mobile adapter...", _sprites);
+        _text.generate(0, 46, "Scanning mobile adapter...", _sprites);
     }
     else if(current_game_mode() == game_mode::multi_wireless)
     {
-        _text.generate(0, 44, "Broadcasting room COSMIC", _sprites);
+        _text.generate(0, 46, "Broadcasting room COSMIC", _sprites);
     }
 
     if(bn::keypad::b_pressed())
@@ -83,16 +107,20 @@ scene_id wait_scene::update()
         return scene_id::multiplayer_menu;
     }
 
-    // Start when 2+ players connected for a short stability window,
-    // or host presses START to launch with current lobby.
-    bool ready = net().is_connected() && _timer > 90;
-    if(ready || (net().is_connected() && bn::keypad::start_pressed()))
+    // Harder sync gate: connected + shared seed + stable lobby window.
+    bool ready = net().lobby_ready() && _timer > 150;
+    bool force = net().lobby_ready() && bn::keypad::start_pressed() && _timer > 60;
+    if(ready || force)
     {
         if(net().host())
         {
-            unsigned seed = unsigned(_timer) * 2654435761u;
-            net().send_seed(seed);
-            seed_rng(seed);
+            if(_lobby_seed == 0)
+            {
+                _lobby_seed = unsigned(_timer) * 2654435761u;
+                if(_lobby_seed == 0) _lobby_seed = 0xC051Cu;
+            }
+            net().send_seed(_lobby_seed);
+            seed_rng(_lobby_seed);
         }
         else
         {

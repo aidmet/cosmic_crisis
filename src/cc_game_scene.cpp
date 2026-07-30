@@ -609,6 +609,12 @@ void game_scene::_update_remote()
     if(! _is_multi()) return;
     net().update();
     int local = net().local_id();
+
+    if(net().host())
+    {
+        net().send_tick(_engine_frame);
+    }
+
     for(int i = 0; i < max_players; ++i)
     {
         if(i == local || ! _remote_ships[i]) continue;
@@ -618,6 +624,24 @@ void game_scene::_update_remote()
             _remote_ships[i]->set_visible(true);
             _remote_ships[i]->set_position(r.x, r.y);
             _remote_ships[i]->set_item(bn::sprite_items::ships, i);
+
+            const int shots = net().consume_fire(i);
+            for(int s = 0; s < shots; ++s)
+            {
+                const int kind = r.weapon;
+                for(auto& b : _bullets)
+                {
+                    if(b.active) continue;
+                    b.active = true;
+                    b.x = r.x + 16;
+                    b.y = r.y;
+                    b.vx = (kind == 2) ? bn::fixed(4) : bn::fixed(3.2);
+                    b.vy = 0;
+                    b.kind = kind;
+                    b.sprite = bn::sprite_items::bullets.create_sprite(b.x, b.y, kind);
+                    break;
+                }
+            }
         }
         else
         {
