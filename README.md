@@ -32,7 +32,7 @@ cp build/compile_commands.json .
 
 - **Play** — endless survival, escalating meteor storms
 - **Story** — five-chapter campaign with commander briefings
-- **Multiplayer** — link cable (2–4), wireless adapter lobby, online/mobile lobby; last survivor wins
+- **Multiplayer** — link cable battle royale: shoot the other pilots; last one standing wins. Single-player modes unchanged.
 - **Options** — music/SFX toggles, story progress reset (SRAM)
 
 ## Power-ups

@@ -79,12 +79,7 @@ void game_scene::enter()
     _chapter_goal = 30 + campaign_chapter() * 18;
     _meteor_seq = 0;
     _engine_frame = 0;
-
-    if(_is_multi())
-    {
-        // Re-seed in case anything touched RNG after the lobby handshake.
-        seed_world_rng(net().shared_seed());
-    }
+    _facing = 1;
 
     int local = _is_multi() ? net().local_id() : 0;
     _ship = bn::sprite_items::ships.create_sprite(_x, _y, local);
@@ -105,6 +100,17 @@ void game_scene::enter()
     for(auto& e : _blasts) { e = blast(); }
 
     _shield_fx.reset();
+
+    if(_is_multi())
+    {
+        _toast_text = "ELIMINATE ALL PILOTS";
+        _toast_timer = 120;
+        // Spread spawn points so the duel is not a pile-up.
+        _x = bn::fixed(-60 + local * 40);
+        _y = bn::fixed(local * 24 - 24);
+        if(_ship) _ship->set_position(_x, _y);
+    }
+
     _rebuild_hud();
 }
 
@@ -132,11 +138,18 @@ void game_scene::_rebuild_hud()
     }
 
     _text.set_left_alignment();
-    bn::string<32> line = "LV";
-    line += bn::to_string<8>(_level);
-    line += "  ";
-    line += bn::to_string<8>(_score);
-    _text.generate(-40, -72, line, _hud);
+    if(_is_multi())
+    {
+        _text.generate(-40, -72, "DUEL", _hud);
+    }
+    else
+    {
+        bn::string<32> line = "LV";
+        line += bn::to_string<8>(_level);
+        line += "  ";
+        line += bn::to_string<8>(_score);
+        _text.generate(-40, -72, line, _hud);
+    }
 
     if(_held != powerup_type::none)
     {
@@ -303,17 +316,23 @@ void game_scene::_fire()
         return;
     }
 
+    const int owner = _is_multi() ? net().local_id() : 0;
+    const bn::fixed speed = (_weapon == weapon_type::heavy) ? bn::fixed(4) : bn::fixed(3.2);
+    const bn::fixed muzzle = bn::fixed(16) * _facing;
+
     auto spawn_bullet = [&](bn::fixed y_off, bn::fixed vy, int kind) {
         for(auto& b : _bullets)
         {
             if(b.active) continue;
             b.active = true;
-            b.x = _x + 16;
+            b.owner = owner;
+            b.x = _x + muzzle;
             b.y = _y + y_off;
-            b.vx = (kind == 2) ? bn::fixed(4) : bn::fixed(3.2);
+            b.vx = speed * _facing;
             b.vy = vy;
             b.kind = kind;
             b.sprite = bn::sprite_items::bullets.create_sprite(b.x, b.y, kind);
+            if(b.sprite) b.sprite->set_horizontal_flip(_facing < 0);
             break;
         }
     };
@@ -339,7 +358,7 @@ void game_scene::_fire()
 
     if(_is_multi())
     {
-        net().send_fire(_y, kind);
+        net().send_fire(_y, kind, _facing);
     }
 }
 
@@ -451,8 +470,16 @@ void game_scene::_update_player()
     bn::fixed max_speed = 2.4 + bn::fixed(_level) * bn::fixed(0.05);
     bool braking = bn::keypad::b_held();
 
-    if(bn::keypad::left_held()) _vx -= accel;
-    if(bn::keypad::right_held()) _vx += accel;
+    if(bn::keypad::left_held())
+    {
+        _vx -= accel;
+        _facing = -1;
+    }
+    if(bn::keypad::right_held())
+    {
+        _vx += accel;
+        _facing = 1;
+    }
     if(bn::keypad::up_held()) _vy -= accel;
     if(bn::keypad::down_held()) _vy += accel;
 
@@ -469,7 +496,14 @@ void game_scene::_update_player()
     _vy = bn::clamp(_vy, -max_speed, max_speed);
     _x += _vx;
     _y += _vy;
-    _x = bn::clamp(_x, bn::fixed(-104), bn::fixed(40));
+    if(_is_multi())
+    {
+        _x = bn::clamp(_x, bn::fixed(-104), bn::fixed(104));
+    }
+    else
+    {
+        _x = bn::clamp(_x, bn::fixed(-104), bn::fixed(40));
+    }
     _y = bn::clamp(_y, bn::fixed(-64), bn::fixed(64));
 
     ++_engine_frame;
@@ -480,6 +514,7 @@ void game_scene::_update_player()
     {
         _ship->set_item(bn::sprite_items::ships, graphics);
         _ship->set_position(_x, _y);
+        _ship->set_horizontal_flip(_facing < 0);
         _ship->set_visible(_i_frames == 0 || (_i_frames / 2) % 2 == 0);
     }
 
@@ -563,6 +598,22 @@ void game_scene::_update_meteors()
 
 void game_scene::_update_bullets()
 {
+    const int local = _is_multi() ? net().local_id() : 0;
+    constexpr bn::fixed ship_rr = 10;
+
+    auto spawn_hit_fx = [&](bn::fixed hx, bn::fixed hy) {
+        for(auto& e : _blasts)
+        {
+            if(e.active) continue;
+            e.active = true;
+            e.age = 0;
+            e.sprite = bn::sprite_items::explosion.create_sprite(hx, hy, 0);
+            e.anim = bn::create_sprite_animate_action_once(
+                *e.sprite, 3, bn::sprite_items::explosion.tiles_item(), 0, 1, 2, 3);
+            break;
+        }
+    };
+
     for(auto& b : _bullets)
     {
         if(! b.active) continue;
@@ -570,10 +621,47 @@ void game_scene::_update_bullets()
         b.y += b.vy;
         if(b.sprite) b.sprite->set_position(b.x, b.y);
 
-        if(b.x > 130 || b.y < -80 || b.y > 80)
+        if(b.x > 130 || b.x < -130 || b.y < -80 || b.y > 80)
         {
             b.active = false;
             b.sprite.reset();
+            continue;
+        }
+
+        if(_is_multi())
+        {
+            // Authoritative for local HP: only foreign bullets can hurt you.
+            if(b.owner != local)
+            {
+                bn::fixed dx = b.x - _x;
+                bn::fixed dy = b.y - _y;
+                if(dx * dx + dy * dy < ship_rr * ship_rr)
+                {
+                    spawn_hit_fx(b.x, b.y);
+                    b.active = false;
+                    b.sprite.reset();
+                    _hit_player();
+                    continue;
+                }
+            }
+
+            // Visual only: stop bullets that clearly strike a remote hull.
+            for(int p = 0; p < max_players; ++p)
+            {
+                if(p == local || p == b.owner) continue;
+                const remote_player& r = net().remote(p);
+                if(! r.active || ! r.alive) continue;
+                bn::fixed dx = b.x - r.x;
+                bn::fixed dy = b.y - r.y;
+                if(dx * dx + dy * dy < ship_rr * ship_rr)
+                {
+                    spawn_hit_fx(b.x, b.y);
+                    b.active = false;
+                    b.sprite.reset();
+                    break;
+                }
+            }
+            if(! b.active) continue;
             continue;
         }
 
@@ -586,13 +674,6 @@ void game_scene::_update_bullets()
             bn::fixed dy = m.y - b.y;
             if(dx * dx + dy * dy < rr * rr)
             {
-                // Multi keeps the shared meteor field intact; bullets are juicers only.
-                if(_is_multi())
-                {
-                    b.active = false;
-                    b.sprite.reset();
-                    break;
-                }
                 int dmg = (b.kind == 2) ? 3 : 1;
                 m.hp -= dmg;
                 b.active = false;
@@ -697,19 +778,24 @@ void game_scene::_update_remote()
             for(int s = 0; s < shots; ++s)
             {
                 const int kind = r.weapon;
+                const int face = r.facing;
+                const bn::fixed speed = (kind == 2) ? bn::fixed(4) : bn::fixed(3.2);
                 for(auto& b : _bullets)
                 {
                     if(b.active) continue;
                     b.active = true;
-                    b.x = r.x + 16;
+                    b.owner = i;
+                    b.x = r.x + bn::fixed(16) * face;
                     b.y = r.y;
-                    b.vx = (kind == 2) ? bn::fixed(4) : bn::fixed(3.2);
+                    b.vx = speed * face;
                     b.vy = 0;
                     b.kind = kind;
                     b.sprite = bn::sprite_items::bullets.create_sprite(b.x, b.y, kind);
+                    if(b.sprite) b.sprite->set_horizontal_flip(face < 0);
                     break;
                 }
             }
+            _remote_ships[i]->set_horizontal_flip(r.facing < 0);
         }
         else
         {
@@ -732,7 +818,14 @@ scene_id game_scene::update()
         _text.set_center_alignment();
         if(_won)
         {
-            _text.generate(0, -10, "SECTOR CLEAR", _hud);
+            if(_is_multi())
+            {
+                _text.generate(0, -10, "LAST PILOT STANDING", _hud);
+            }
+            else
+            {
+                _text.generate(0, -10, "SECTOR CLEAR", _hud);
+            }
             _text.generate(0, 10, "A: continue", _hud);
             if(bn::keypad::a_pressed())
             {
@@ -759,7 +852,7 @@ scene_id game_scene::update()
             _text.generate(0, 24, "A: title", _hud);
             if(_is_multi())
             {
-                _text.generate(0, 40, "Last survivor wins", _hud);
+                _text.generate(0, 40, "Eliminate the others", _hud);
             }
             if(bn::keypad::a_pressed() && _game_over_timer > 40)
             {
@@ -777,7 +870,7 @@ scene_id game_scene::update()
 
     if(bn::keypad::start_pressed())
     {
-        // Pausing freezes only one peer and breaks the lockstep meteor field.
+        // Pausing freezes only one peer and desyncs the duel.
         if(! _is_multi())
         {
             _paused = ! _paused;
@@ -807,20 +900,26 @@ scene_id game_scene::update()
     _update_remote();
     _apply_net_world();
 
-    int spawn_every = _is_multi() ? 28 : bn::max(18, 50 - _level * 3);
-    if(++_spawn_timer >= spawn_every)
+    // Multi is a ship duel — no shared meteor field on the wire.
+    if(! _is_multi())
     {
-        _spawn_timer = 0;
-        // Both peers simulate the same meteor field from the shared lobby seed.
-        _spawn_meteor();
+        int spawn_every = bn::max(18, 50 - _level * 3);
+        if(++_spawn_timer >= spawn_every)
+        {
+            _spawn_timer = 0;
+            _spawn_meteor();
+        }
+        _update_meteors();
     }
 
-    _update_meteors();
     _update_bullets();
-    _update_pickups();
+    if(! _is_multi())
+    {
+        _update_pickups();
+    }
     _update_blasts();
 
-    if(_passed >= _meteors_for_level())
+    if(! _is_multi() && _passed >= _meteors_for_level())
     {
         _next_level();
     }
@@ -831,8 +930,8 @@ scene_id game_scene::update()
         _game_over_timer = 0;
     }
 
-    // Multiplayer win: you survive while all remotes dead (and connected)
-    if(_is_multi() && net().is_connected())
+    // Multiplayer win: eliminate every other connected pilot.
+    if(_is_multi() && net().is_connected() && ! _dead)
     {
         bool any_other_alive = false;
         int local = net().local_id();

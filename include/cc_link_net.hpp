@@ -41,6 +41,7 @@ struct remote_player
     bn::fixed y = 0;
     int lives = start_lives;
     int weapon = 0;
+    int facing = 1;
     int pending_fire = 0;
     int last_seen = 0;
 };
@@ -65,7 +66,7 @@ public:
     void send_ready();
     void send_seed(unsigned seed);
     void send_state(bn::fixed x, bn::fixed y, int lives, bool braking);
-    void send_fire(bn::fixed y, int weapon);
+    void send_fire(bn::fixed y, int weapon, int facing = 1);
     void send_dead();
     void send_slow(int frames);
     void send_go();

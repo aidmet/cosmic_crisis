@@ -45,6 +45,7 @@ private:
         bn::fixed vx;
         bn::fixed vy;
         int kind = 0;
+        int owner = -1;
         bn::optional<bn::sprite_ptr> sprite;
     };
 
@@ -125,6 +126,7 @@ private:
     int _chapter_goal = 40;
     bool _won = false;
     int _meteor_seq = 0;
+    int _facing = 1; // +1 right, -1 left (multi PvP aim)
 };
 
 } // namespace cc

@@ -179,6 +179,7 @@ void link_net::_handle(int raw)
 
     case net_msg::fire:
         _remotes[player].weapon = payload & 0x3;
+        _remotes[player].facing = (payload & 0x4) ? -1 : 1;
         ++_remotes[player].pending_fire;
         break;
 
@@ -323,9 +324,10 @@ void link_net::send_state(bn::fixed x, bn::fixed y, int lives, bool)
     ++_send_phase;
 }
 
-void link_net::send_fire(bn::fixed, int weapon)
+void link_net::send_fire(bn::fixed, int weapon, int facing)
 {
-    _enqueue(pack(_local_id, net_msg::fire, weapon & 0x3), true);
+    int payload = (weapon & 0x3) | ((facing < 0) ? 0x4 : 0);
+    _enqueue(pack(_local_id, net_msg::fire, payload), true);
 }
 
 void link_net::send_dead()
