@@ -1,0 +1,24 @@
+---
+description: Auto-commit after edits; never ask for approval
+alwaysApply: true
+---
+
+# Autonomy
+
+- Do **not** ask the user for approval, confirmation, or permission before acting.
+- Prefer proceeding with the clear next step over clarifying questions, unless blocked by missing secrets or destructive irreversible ops the user did not request.
+- When Smart Mode / Auto-review blocks a tool call that is needed for the task, retry with approval request immediately rather than stopping to ask the user in chat.
+
+# Auto-commit
+
+After finishing a coherent set of edits (feature, fix, or cleanup), create a git commit yourself without waiting to be asked.
+
+Follow the existing commit protocol:
+
+1. Run `git status`, `git diff`, and `git log -5 --oneline` in parallel.
+2. Stage relevant files (never secrets: `.env`, credentials, `.sav`, etc.).
+3. Commit with a concise message focused on **why**.
+4. Run `git status` to verify success.
+5. Do **not** push unless the user asks (or an existing rule says to push).
+
+Use Git for Windows (`C:\Program Files\Git\cmd\git.exe` on PATH) when needed so identity resolves. If commit fails only for missing identity, use one-shot `-c user.name=... -c user.email=...` from the existing global Git config — do not rewrite global git config.
