@@ -7,7 +7,9 @@
 *.iso
 *.sa2
 
-# Vendored / cloned deps (not required for Butano bn::link build)
+# Required for Wireless / Mobile multipath (clone if missing):
+#   git clone --depth 1 https://github.com/afska/gba-link-connection.git
+# Keep out of git history (large); build expects it at repo root.
 /gba-link-connection/
 
 # Local / IDE

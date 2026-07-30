@@ -44,7 +44,7 @@ void multi_menu_scene::_rebuild_menu()
     _text_sprites.clear();
     _text.set_center_alignment();
     _text.generate(0, -50, "MULTIPLAYER", _text_sprites);
-    _text.generate(0, -34, "Battle royale duel", _text_sprites);
+    _text.generate(0, -34, "Cable / Wireless / Mobile", _text_sprites);
 
     for(int i = 0; i < menu_count; ++i)
     {

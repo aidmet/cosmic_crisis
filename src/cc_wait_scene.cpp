@@ -32,6 +32,10 @@ void wait_scene::enter()
     {
         max_p = 5;
     }
+    else if(current_game_mode() == game_mode::multi_online)
+    {
+        max_p = 2;
+    }
     net().start(current_game_mode(), max_p);
     net().send_hello();
 }
@@ -64,6 +68,19 @@ scene_id wait_scene::update()
     ++_timer;
     ++_pulse;
 
+    // Online: choose wait vs dial once the mobile session is up.
+    if(net().using_online() && net().online_can_dial())
+    {
+        if(bn::keypad::start_pressed())
+        {
+            net().online_wait_incoming();
+        }
+        if(bn::keypad::a_pressed())
+        {
+            net().online_dial_default();
+        }
+    }
+
     // Host locks one seed and rebroadcasts it so clients converge.
     if(net().host() && net().is_connected())
     {
@@ -83,15 +100,17 @@ scene_id wait_scene::update()
 
     const char* mode_name = "Link Cable";
     if(current_game_mode() == game_mode::multi_wireless) mode_name = "Wireless Adapter";
-    if(current_game_mode() == game_mode::multi_online) mode_name = "Online Relay";
+    if(current_game_mode() == game_mode::multi_online) mode_name = "Mobile Adapter";
 
-    _text.generate(0, -40, mode_name, _sprites);
-    _text.generate(0, -20, "Waiting for pilots...", _sprites);
+    _text.generate(0, -48, mode_name, _sprites);
+    _text.generate(0, -28, "Waiting for pilots...", _sprites);
 
     bn::string<40> status;
     status = "Players: ";
     status += bn::to_string<8>(net().player_count());
-    _text.generate(0, 0, status, _sprites);
+    _text.generate(0, -8, status, _sprites);
+
+    _text.generate(0, 12, net().transport_status(), _sprites);
 
     if(bn::keypad::b_pressed())
     {
@@ -105,9 +124,11 @@ scene_id wait_scene::update()
         return launch_match(net().shared_seed());
     }
 
-    // Arm when lobby is stable (or Start). Both sides must arm before launch.
+    // Arm when lobby is stable (or Start on cable/wireless). Online uses A to dial.
     bool can_arm = net().lobby_ready() && _timer > 90;
-    if(! _armed && can_arm && (_timer > 150 || bn::keypad::start_pressed()))
+    bool force_arm = can_arm && bn::keypad::start_pressed() && _timer > 60 &&
+                     ! net().using_online();
+    if(! _armed && can_arm && (_timer > 150 || force_arm))
     {
         _armed = true;
     }
@@ -131,18 +152,22 @@ scene_id wait_scene::update()
             }
             else
             {
-                _text.generate(0, 24, "Ready - wait for host", _sprites);
+                _text.generate(0, 32, "Ready - wait for host", _sprites);
             }
         }
         else
         {
             _countdown = 0;
-            _text.generate(0, 24, "Ready - waiting for peer", _sprites);
+            _text.generate(0, 32, "Ready - waiting for peer", _sprites);
         }
+    }
+    else if(net().using_online() && net().online_can_dial())
+    {
+        _text.generate(0, 32, "A: dial  START: wait  B: back", _sprites);
     }
     else if((_pulse / 20) % 2 == 0)
     {
-        _text.generate(0, 24, "B: cancel", _sprites);
+        _text.generate(0, 32, "B: cancel", _sprites);
     }
 
     if(net().host() && _countdown > 0)
@@ -150,26 +175,16 @@ scene_id wait_scene::update()
         --_countdown;
         bn::string<24> go = "Launch in ";
         go += bn::to_string<8>((_countdown / 20) + 1);
-        _text.generate(0, 24, go, _sprites);
+        _text.generate(0, 32, go, _sprites);
 
         if(_countdown == 0)
         {
             unsigned seed = _lobby_seed ? _lobby_seed : 0xC051Cu;
             net().send_seed(seed);
             net().send_go();
-            // Flush go immediately — do not wait a frame for the queue.
             net().update();
             return launch_match(seed);
         }
-    }
-
-    if(current_game_mode() == game_mode::multi_online)
-    {
-        _text.generate(0, 44, "Scanning mobile adapter...", _sprites);
-    }
-    else if(current_game_mode() == game_mode::multi_wireless)
-    {
-        _text.generate(0, 44, "Broadcasting room COSMIC", _sprites);
     }
 
     return scene_id::link_wait;

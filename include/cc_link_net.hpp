@@ -9,13 +9,14 @@
 namespace cc
 {
 
-// Packet layout in 16-bit bn::link messages:
+// Packet layout in 16-bit link messages:
 // bits 0-3: player id
 // bits 4-7: msg type
 // bits 8-15: payload
 //
-// bn::link retains only the latest message per peer each frame, so gameplay
-// traffic must be one meaningful packet at a time (ships / fire / lobby).
+// Backends:
+// - Link cable / Wireless Adapter: gba-link-connection LinkUniversal
+// - Online (Mobile Adapter GB / REON): LinkMobile P2P transfers
 
 enum class net_msg : int
 {
@@ -56,11 +57,19 @@ public:
     [[nodiscard]] bool is_connected() const;
     [[nodiscard]] bool seed_ready() const;
     [[nodiscard]] bool lobby_ready() const;
-    // True when every recently-seen remote has sent ready.
     [[nodiscard]] bool peers_ready() const;
     [[nodiscard]] int local_id() const;
     [[nodiscard]] int player_count() const;
     [[nodiscard]] unsigned shared_seed() const;
+
+    // Short ASCII status for lobby UI (never uses non-font glyphs).
+    [[nodiscard]] const char* transport_status() const;
+
+    // Online (mobile adapter) controls once SESSION_ACTIVE.
+    void online_wait_incoming();
+    void online_dial_default();
+    [[nodiscard]] bool online_can_dial() const;
+    [[nodiscard]] bool online_waiting_incoming() const;
 
     void send_hello();
     void send_ready();
@@ -83,18 +92,33 @@ public:
     [[nodiscard]] bool poll_go();
 
 private:
-    void _pump_bn_link();
+    enum class backend : int
+    {
+        none,
+        universal,
+        mobile
+    };
+
     void _handle(int raw);
     void _mark_seen(int player);
     void _enqueue(int packet, bool urgent = false);
-    void _flush_one();
+    void _flush_outgoing();
+    void _pump_universal();
+    void _pump_mobile();
+    void _install_universal_irqs();
+    void _install_mobile_irqs();
+    void _clear_extra_irqs();
 
     game_mode _mode = game_mode::multi_cable;
+    backend _backend = backend::none;
     bool _active = false;
     bool _connected = false;
     bool _host = true;
     bool _got_seed_lo = false;
     bool _got_seed_hi = false;
+    bool _online_wait_incoming = true;
+    bool _online_dial_started = false;
+    bool _mobile_transfer_busy = false;
     int _local_id = 0;
     int _player_count = 1;
     int _max_players = 4;
@@ -103,7 +127,6 @@ private:
     unsigned _seed_lo = 0;
     unsigned _seed_hi = 0;
     remote_player _remotes[max_players];
-    int _timeout = 0;
     int _send_phase = 0;
 
     static constexpr int out_cap = 16;

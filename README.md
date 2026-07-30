@@ -28,12 +28,19 @@ cp build/compile_commands.json .
 | START | Pause |
 | A+B+START+SELECT | Emergency restart to title |
 
-## Modes
+## Multiplayer backends
 
-- **Play** — endless survival, escalating meteor storms
-- **Story** — five-chapter campaign with commander briefings
-- **Multiplayer** — link cable battle royale: shoot the other pilots; last one standing wins. Single-player modes unchanged.
-- **Options** — music/SFX toggles, story progress reset (SRAM)
+Requires [gba-link-connection](https://github.com/afska/gba-link-connection) at the repo root:
+
+```bash
+git clone --depth 1 https://github.com/afska/gba-link-connection.git
+```
+
+| Menu | Hardware | Notes |
+|---|---|---|
+| LINK CABLE | GBA link cable / mGBA multiplayer windows | 2–4 players |
+| WIRELESS | Official Wireless Adapter | 2–5 players, room name `COSMIC` |
+| ONLINE | Mobile Adapter GB (REON) | 2 players; A dials `127.0.0.1`, START waits for call |
 
 ## Power-ups
 

@@ -1,9 +1,19 @@
 #include "cc_link_net.hpp"
 
-#include "bn_link.h"
-#include "bn_link_state.h"
-#include "bn_link_player.h"
+#include "bn_core.h"
 #include "bn_algorithm.h"
+
+#include "LinkUniversal.hpp"
+#include "LinkMobile.hpp"
+
+extern "C"
+{
+#include "ugba/interrupts.h"
+}
+
+// Required globals for gba-link-connection ISR macros.
+LinkUniversal* linkUniversal = nullptr;
+LinkMobile* linkMobile = nullptr;
 
 namespace cc
 {
@@ -22,7 +32,6 @@ constexpr int encode_x(bn::fixed x)
 
 constexpr int encode_y(bn::fixed y)
 {
-    // 7 bits for position; high bit reserved for facing in state_y packets.
     return bn::clamp((y + 80).right_shift_integer(), 0, 127);
 }
 
@@ -35,12 +44,43 @@ constexpr bn::fixed decode_y(int payload)
 {
     return bn::fixed(payload) - 80;
 }
+
+// REON / libmobile loopback-style IPv4 phone number (127.0.0.1).
+constexpr const char* default_online_peer = "127000000001";
+
+LinkMobile::DataTransfer g_mobile_tx;
+LinkMobile::DataTransfer g_mobile_rx;
 }
 
 link_net& net()
 {
     static link_net instance;
     return instance;
+}
+
+void link_net::_install_universal_irqs()
+{
+    bn::core::set_vblank_callback(LINK_UNIVERSAL_ISR_VBLANK);
+    IRQ_SetHandler(UGBA_IRQ_SERIAL, LINK_UNIVERSAL_ISR_SERIAL);
+    IRQ_Enable(UGBA_IRQ_SERIAL);
+    IRQ_SetHandler(UGBA_IRQ_TIMER3, LINK_UNIVERSAL_ISR_TIMER);
+    IRQ_Enable(UGBA_IRQ_TIMER3);
+}
+
+void link_net::_install_mobile_irqs()
+{
+    bn::core::set_vblank_callback(LINK_MOBILE_ISR_VBLANK);
+    IRQ_SetHandler(UGBA_IRQ_SERIAL, LINK_MOBILE_ISR_SERIAL);
+    IRQ_Enable(UGBA_IRQ_SERIAL);
+    IRQ_SetHandler(UGBA_IRQ_TIMER3, LINK_MOBILE_ISR_TIMER);
+    IRQ_Enable(UGBA_IRQ_TIMER3);
+}
+
+void link_net::_clear_extra_irqs()
+{
+    bn::core::set_vblank_callback(nullptr);
+    IRQ_Disable(UGBA_IRQ_SERIAL);
+    IRQ_Disable(UGBA_IRQ_TIMER3);
 }
 
 void link_net::start(game_mode mode, int max_players_wanted)
@@ -53,13 +93,15 @@ void link_net::start(game_mode mode, int max_players_wanted)
     _host = true;
     _got_seed_lo = false;
     _got_seed_hi = false;
+    _online_wait_incoming = true;
+    _online_dial_started = false;
+    _mobile_transfer_busy = false;
     _local_id = 0;
     _player_count = 1;
     _age = 0;
     _seed = 0xC051Cu ^ (unsigned)mode;
     _seed_lo = 0;
     _seed_hi = 0;
-    _timeout = 0;
     _send_phase = 0;
     _out_n = 0;
     _slow_ready = false;
@@ -68,18 +110,73 @@ void link_net::start(game_mode mode, int max_players_wanted)
     {
         _remotes[i] = remote_player();
     }
+
+    if(mode == game_mode::multi_online)
+    {
+        _backend = backend::mobile;
+        _max_players = 2;
+        _install_mobile_irqs();
+        linkMobile = new LinkMobile();
+        linkMobile->activate();
+    }
+    else
+    {
+        _backend = backend::universal;
+        const bool wireless = (mode == game_mode::multi_wireless);
+        auto protocol = wireless ? LinkUniversal::Protocol::WIRELESS_AUTO
+                                 : LinkUniversal::Protocol::CABLE;
+        _install_universal_irqs();
+        linkUniversal = new LinkUniversal(
+            protocol,
+            "COSMIC",
+            LinkUniversal::CableOptions{
+                LinkCable::BaudRate::BAUD_RATE_1,
+                LINK_CABLE_DEFAULT_TIMEOUT,
+                LINK_CABLE_DEFAULT_INTERVAL,
+                LINK_CABLE_DEFAULT_SEND_TIMER_ID},
+            LinkUniversal::WirelessOptions{
+                true,
+                true,
+                (Link::u32)_max_players,
+                LINK_WIRELESS_DEFAULT_TIMEOUT,
+                LINK_WIRELESS_DEFAULT_INTERVAL,
+                LINK_WIRELESS_DEFAULT_SEND_TIMER_ID});
+        linkUniversal->activate();
+    }
+
     _enqueue(pack(0, net_msg::hello, _max_players), true);
 }
 
 void link_net::stop()
 {
-    if(_active)
+    if(! _active && _backend == backend::none)
     {
-        bn::link::deactivate();
+        return;
     }
+
+    if(linkUniversal)
+    {
+        linkUniversal->deactivate();
+        delete linkUniversal;
+        linkUniversal = nullptr;
+    }
+    if(linkMobile)
+    {
+        if(linkMobile->canShutdown())
+        {
+            linkMobile->shutdown();
+        }
+        linkMobile->deactivate();
+        delete linkMobile;
+        linkMobile = nullptr;
+    }
+
+    _clear_extra_irqs();
+    _backend = backend::none;
     _active = false;
     _connected = false;
     _out_n = 0;
+    _mobile_transfer_busy = false;
 }
 
 void link_net::_enqueue(int packet, bool urgent)
@@ -100,14 +197,6 @@ void link_net::_enqueue(int packet, bool urgent)
     }
 
     _out_q[_out_n++] = packet;
-}
-
-void link_net::_flush_one()
-{
-    if(_out_n <= 0) return;
-    bn::link::send(_out_q[0]);
-    for(int i = 1; i < _out_n; ++i) _out_q[i - 1] = _out_q[i];
-    --_out_n;
 }
 
 void link_net::_mark_seen(int player)
@@ -204,31 +293,123 @@ void link_net::_handle(int raw)
     }
 }
 
-void link_net::_pump_bn_link()
+void link_net::_flush_outgoing()
 {
-    for(int attempt = 0; attempt < 4; ++attempt)
+    if(_backend == backend::universal)
     {
-        auto state = bn::link::receive();
-        if(! state)
+        if(! linkUniversal || ! linkUniversal->isConnected()) return;
+        // Two packets per frame keeps ship x/y responsive.
+        for(int n = 0; n < 2 && _out_n > 0; ++n)
         {
-            if(attempt == 0) ++_timeout;
-            break;
+            if(! linkUniversal->canSend()) break;
+            linkUniversal->send(Link::u16(_out_q[0]));
+            for(int i = 1; i < _out_n; ++i) _out_q[i - 1] = _out_q[i];
+            --_out_n;
         }
+        return;
+    }
 
-        _timeout = 0;
-        _player_count = bn::max(_player_count, state->player_count());
-        _local_id = state->current_player_id();
-        _host = (_local_id == 0);
-        _connected = state->player_count() >= 2;
+    if(_backend == backend::mobile)
+    {
+        if(! linkMobile || ! linkMobile->isConnectedP2P()) return;
+        if(_mobile_transfer_busy) return;
+        if(_out_n <= 0) return;
 
-        for(const bn::link_player& p : state->other_players())
+        g_mobile_tx = LinkMobile::DataTransfer();
+        int bytes = 0;
+        while(_out_n > 0 && bytes + 2 <= LINK_MOBILE_MAX_USER_TRANSFER_LENGTH)
         {
-            _handle(int(p.data()));
-            const int id = p.id();
-            if(id >= 0 && id < max_players)
+            auto word = Link::u16(_out_q[0]);
+            g_mobile_tx.data[bytes++] = Link::u8(word & 0xFF);
+            g_mobile_tx.data[bytes++] = Link::u8((word >> 8) & 0xFF);
+            for(int i = 1; i < _out_n; ++i) _out_q[i - 1] = _out_q[i];
+            --_out_n;
+        }
+        g_mobile_tx.size = Link::u8(bytes);
+        g_mobile_rx = LinkMobile::DataTransfer();
+        if(linkMobile->transfer(g_mobile_tx, &g_mobile_rx))
+        {
+            _mobile_transfer_busy = true;
+        }
+    }
+}
+
+void link_net::_pump_universal()
+{
+    if(! linkUniversal) return;
+    linkUniversal->sync();
+
+    if(! linkUniversal->isConnected())
+    {
+        _connected = false;
+        return;
+    }
+
+    _local_id = int(linkUniversal->currentPlayerId());
+    _player_count = bn::max(int(linkUniversal->playerCount()), _player_count);
+    _host = (_local_id == 0);
+    _connected = _player_count >= 2;
+
+    for(Link::u32 p = 0; p < linkUniversal->playerCount(); ++p)
+    {
+        if(int(p) == _local_id) continue;
+        while(linkUniversal->canRead(p))
+        {
+            Link::u16 raw = linkUniversal->read(p);
+            _handle(int(raw));
+            _mark_seen(int(p));
+        }
+    }
+}
+
+void link_net::_pump_mobile()
+{
+    if(! linkMobile) return;
+
+    if(linkMobile->getState() == LinkMobile::State::NEEDS_RESET)
+    {
+        _connected = false;
+        return;
+    }
+
+    if(linkMobile->isSessionActive() && ! _online_wait_incoming && ! _online_dial_started)
+    {
+        // Client requested dial earlier but session wasn't ready yet.
+    }
+
+    if(linkMobile->isConnectedP2P())
+    {
+        _connected = true;
+        _player_count = 2;
+        // Receiver hosts the match seed; caller is player 1.
+        if(linkMobile->getRole() == LinkMobile::Role::RECEIVER)
+        {
+            _local_id = 0;
+            _host = true;
+        }
+        else
+        {
+            _local_id = 1;
+            _host = false;
+        }
+        _remotes[1 - _local_id].active = true;
+        _remotes[1 - _local_id].last_seen = _age;
+        _remotes[1 - _local_id].alive = true;
+    }
+    else
+    {
+        _connected = false;
+    }
+
+        if(_mobile_transfer_busy && g_mobile_rx.completed)
+    {
+        _mobile_transfer_busy = false;
+        if(g_mobile_rx.success)
+        {
+            for(Link::u8 i = 0; i + 1 < g_mobile_rx.size; i += 2)
             {
-                _remotes[id].active = true;
-                _remotes[id].last_seen = _age;
+                int raw = int(g_mobile_rx.data[i]) | (int(g_mobile_rx.data[i + 1]) << 8);
+                _handle(raw);
             }
         }
     }
@@ -238,21 +419,27 @@ void link_net::update()
 {
     if(!_active) return;
     ++_age;
-    _pump_bn_link();
+
+    if(_backend == backend::universal)
+    {
+        _pump_universal();
+    }
+    else if(_backend == backend::mobile)
+    {
+        _pump_mobile();
+    }
 
     for(int i = 0; i < max_players; ++i)
     {
         if(i == _local_id) continue;
-        if(_remotes[i].active && (_age - _remotes[i].last_seen) > 120)
+        if(_remotes[i].active && (_age - _remotes[i].last_seen) > 180)
         {
             _remotes[i].active = false;
             _remotes[i].alive = false;
         }
     }
 
-    _flush_one();
-    // Ship x/y can share a frame now that meteors are not on the wire.
-    _flush_one();
+    _flush_outgoing();
 }
 
 bool link_net::is_connected() const { return _connected; }
@@ -265,6 +452,7 @@ bool link_net::seed_ready() const
 bool link_net::lobby_ready() const
 {
     if(! _connected || ! seed_ready()) return false;
+    if(_backend == backend::mobile) return true;
     int seen = 1;
     for(int i = 0; i < max_players; ++i)
     {
@@ -277,6 +465,11 @@ bool link_net::lobby_ready() const
 bool link_net::peers_ready() const
 {
     if(! _connected || ! seed_ready()) return false;
+    if(_backend == backend::mobile)
+    {
+        int other = 1 - _local_id;
+        return _remotes[other].ready;
+    }
     int need = 0;
     int got = 0;
     for(int i = 0; i < max_players; ++i)
@@ -293,6 +486,93 @@ bool link_net::peers_ready() const
 int link_net::local_id() const { return _local_id; }
 int link_net::player_count() const { return _player_count; }
 unsigned link_net::shared_seed() const { return _seed; }
+
+const char* link_net::transport_status() const
+{
+    if(_backend == backend::universal && linkUniversal)
+    {
+        if(linkUniversal->isConnected())
+        {
+            return using_wireless() ? "Wireless linked" : "Cable linked";
+        }
+        if(using_wireless())
+        {
+            switch(linkUniversal->getWirelessState())
+            {
+            case LinkWireless::State::SEARCHING: return "Scanning COSMIC rooms";
+            case LinkWireless::State::SERVING: return "Hosting COSMIC room";
+            case LinkWireless::State::CONNECTING: return "Joining COSMIC room";
+            case LinkWireless::State::CONNECTED: return "Wireless handshake";
+            default: return "Starting wireless";
+            }
+        }
+        return "Waiting for cable peers";
+    }
+
+    if(_backend == backend::mobile && linkMobile)
+    {
+        switch(linkMobile->getState())
+        {
+        case LinkMobile::State::NEEDS_RESET: return "No mobile adapter";
+        case LinkMobile::State::PINGING:
+        case LinkMobile::State::WAITING_TO_START:
+        case LinkMobile::State::STARTING_SESSION:
+        case LinkMobile::State::ACTIVATING_SIO32:
+        case LinkMobile::State::WAITING_32BIT_SWITCH:
+        case LinkMobile::State::READING_CONFIGURATION:
+            return "Detecting mobile adapter";
+        case LinkMobile::State::SESSION_ACTIVE:
+            return _online_wait_incoming ? "Wait for call (START)" : "Ready to dial (A)";
+        case LinkMobile::State::CALL_REQUESTED:
+        case LinkMobile::State::CALLING:
+            return "Calling peer...";
+        case LinkMobile::State::CALL_ESTABLISHED:
+            return "Online P2P linked";
+        case LinkMobile::State::ISP_CALL_REQUESTED:
+        case LinkMobile::State::ISP_CALLING:
+        case LinkMobile::State::PPP_LOGIN:
+            return "ISP login...";
+        case LinkMobile::State::PPP_ACTIVE:
+            return "PPP online";
+        case LinkMobile::State::SHUTDOWN_REQUESTED:
+        case LinkMobile::State::ENDING_SESSION:
+        case LinkMobile::State::WAITING_8BIT_SWITCH:
+        case LinkMobile::State::SHUTDOWN:
+            return "Adapter shutting down";
+        default:
+            return "Mobile adapter busy";
+        }
+    }
+
+    return "Link idle";
+}
+
+void link_net::online_wait_incoming()
+{
+    _online_wait_incoming = true;
+    _online_dial_started = false;
+}
+
+void link_net::online_dial_default()
+{
+    if(! linkMobile) return;
+    if(! linkMobile->isSessionActive()) return;
+    if(_online_dial_started) return;
+    _online_wait_incoming = false;
+    _online_dial_started = true;
+    linkMobile->call(default_online_peer);
+}
+
+bool link_net::online_can_dial() const
+{
+    return _backend == backend::mobile && linkMobile && linkMobile->isSessionActive() &&
+           ! linkMobile->isConnectedP2P();
+}
+
+bool link_net::online_waiting_incoming() const
+{
+    return _online_wait_incoming;
+}
 
 void link_net::send_hello()
 {
