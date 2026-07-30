@@ -1,0 +1,27 @@
+CompileFlags:
+  Remove:
+    - -mthumb-interwork
+    - -Wduplicated-cond
+    - -Wduplicated-branches
+    - -Wlogical-op
+    - -Wuseless-cast
+    - -Wstack-usage=*
+    - -Wall
+    - -Wextra
+    - -Wpedantic
+    - -Wshadow
+    - -Wundef
+    - -Wunused-parameter
+    - -Wmisleading-indentation
+    - -Wnull-dereference
+    - -Wswitch-default
+    - -Wnon-virtual-dtor
+    - -Woverloaded-virtual
+  Add:
+    - -Wno-everything
+
+Diagnostics:
+  UnusedIncludes: None
+  MissingIncludes: None
+  ClangTidy:
+    Remove: '*'

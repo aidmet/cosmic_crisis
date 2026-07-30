@@ -1,0 +1,28 @@
+# Build outputs
+/build/
+*.elf
+*.gba
+*.sav
+*.map
+*.iso
+
+# Vendored / cloned deps (not required for Butano bn::link build)
+/gba-link-connection/
+
+# Local / IDE
+.cache/
+.vscode/
+compile_commands.json
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Temp asset tools
+tools/_*.py
