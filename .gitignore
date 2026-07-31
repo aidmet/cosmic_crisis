@@ -7,6 +7,7 @@
 *.iso
 *.sa2
 *.asm
+/tools/
 
 # Required for Wireless / Mobile multipath (clone if missing):
 #   git clone --depth 1 https://github.com/afska/gba-link-connection.git
